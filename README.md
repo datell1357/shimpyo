@@ -31,7 +31,7 @@ Pleos Connect Emulator 설치는 [Pleos Connect Emulator 설치 및 실행](http
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-release APK: [`apk/Shimpyo_쉼표_release.apk`](apk/) (v0.2.0, R8 축소·서명). 직접 만들려면 `keystore.properties`(storeFile, storePassword, keyAlias, keyPassword — 저장소에 올리지 않음)를 두고 `./gradlew assembleRelease`를 실행합니다.
+release APK: [`apk/Shimpyo_쉼표_release.apk`](apk/) (v0.2.1, R8 축소·서명). 직접 만들려면 `keystore.properties`(storeFile, storePassword, keyAlias, keyPassword — 저장소에 올리지 않음)를 두고 `./gradlew assembleRelease`를 실행합니다.
 
 ### 테스트
 

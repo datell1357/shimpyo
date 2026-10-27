@@ -208,8 +208,9 @@ class ShimpyoController(
         voice.cancelListening()
         restEndAt = clock() + minutes * minuteMillis
         _state.update {
-            it.copy(phase = Phase.RESTING, restTotalMs = restEndAt - restStartedAt, wakeDone = emptySet(),
-                restMinutes = it.restMinutes + minutes, askingAwake = false)
+            // 남은 시간도 같이 넣어야 다음 tick 전까지 시계가 0:00으로 보이지 않는다
+            it.copy(phase = Phase.RESTING, restTotalMs = restEndAt - restStartedAt, restRemainingMs = restEndAt - clock(),
+                wakeDone = emptySet(), restMinutes = it.restMinutes + minutes, askingAwake = false)
         }
         persist()
         flowJob = scope.launch {
@@ -320,7 +321,8 @@ class ShimpyoController(
             nextArea = next,
             targetDistanceKm = targetKm,
             arrived = s.arrived || arrivedByDistance,
-            restRemainingMs = if (s.phase == Phase.RESTING || s.phase == Phase.WAKING) remaining else s.restRemainingMs,
+            // 시트·공조를 맞추는 동안(busy)은 시계를 멈춰 둔다 — 준비가 끝나면 시작 시각을 다시 잡는다
+            restRemainingMs = if ((s.phase == Phase.RESTING || s.phase == Phase.WAKING) && !s.busy) remaining else s.restRemainingMs,
             seatbelt = belt,
             beltWasOff = s.beltWasOff || (resting && belt == false),
             features = vehicle.features.value,
@@ -472,7 +474,12 @@ class ShimpyoController(
         restStartedAt = clock()
         restEndAt = restStartedAt + minutes * minuteMillis
         // 시트를 움직이기 전에 먼저 저장 — 도중에 앱이 꺼져도 다시 켜질 때 되돌릴 수 있게
-        _state.update { it.copy(phase = Phase.RESTING, passengers = passengers) }
+        _state.update {
+            // 화면이 쉼표로 바뀌는 순간부터 남은 시간을 보여 준다(다음 tick을 기다리면 0:00이 잠깐 보임)
+            it.copy(phase = Phase.RESTING, passengers = passengers, restTotalMs = restEndAt - restStartedAt,
+                restRemainingMs = restEndAt - restStartedAt, applied = emptyList(), manualHints = emptyList(),
+                wakeDone = emptySet())
+        }
         seatReclined = true
         persist()
 
