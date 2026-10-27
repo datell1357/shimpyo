@@ -97,6 +97,15 @@ class CoreLogicTest {
         assertNull(VoiceIntent.parse(""))
     }
 
+    @Test fun `받침에 맞는 조사`() {
+        assertEquals("옥산 졸음쉼터를", app.shimpyo.core.Josa.eulReul("옥산 졸음쉼터"))
+        assertEquals("옥산을", app.shimpyo.core.Josa.eulReul("옥산"))
+        assertEquals("옥산으로", app.shimpyo.core.Josa.ro("옥산"))
+        assertEquals("진주로", app.shimpyo.core.Josa.ro("진주"))
+        assertEquals("서울로", app.shimpyo.core.Josa.ro("서울"))       // ㄹ 받침
+        assertEquals("대관령으로", app.shimpyo.core.Josa.ro("대관령"))
+    }
+
     @Test fun `시간 표시`() {
         assertEquals("40분", ShimpyoController.durationText(40))
         assertEquals("2시간", ShimpyoController.durationText(120))

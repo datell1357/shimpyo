@@ -29,7 +29,7 @@ Pleos Connect Emulator 설치는 [Pleos Connect Emulator 설치 및 실행](http
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-release APK는 `apk/` 폴더에 있습니다. 직접 만들려면 저장소 밖에 `keystore.properties`(storeFile, storePassword, keyAlias, keyPassword)를 두고 `./gradlew assembleRelease`를 실행합니다.
+release APK: [`apk/Shimpyo_쉼표_release.apk`](apk/) (v0.1.0, R8 축소·서명). 직접 만들려면 `keystore.properties`(storeFile, storePassword, keyAlias, keyPassword — 저장소에 올리지 않음)를 두고 `./gradlew assembleRelease`를 실행합니다.
 
 ### 테스트
 
@@ -51,6 +51,26 @@ release APK는 `apk/` 폴더에 있습니다. 직접 만들려면 저장소 밖�
 8. 시간이 되면 깨우기가 진행되고, Safety에서 안전벨트를 풀었다 매면 출발 안내가 나옵니다.
 
 차량이 아닌 기기(폰 에뮬레이터)에서는 가상 차량으로 실행되며, 설정 화면에서 기어·안전벨트를 바꿀 수 있습니다.
+
+### 에뮬레이터에서 확인한 것 (Pleos Connect Emulator v2.1.0)
+
+| 기능 | 결과 |
+|---|---|
+| 기어·속도 구독, 주행 규제(CarUxRestrictions) | ◯ 주행 중에는 설정 버튼이 숨겨짐 |
+| FusedLocation 위치 → 앞쪽 졸음쉼터 계산 | ◯ |
+| TextToSpeech(ON_DEVICE, 한국어) | ◯ 안내 음성 재생 |
+| SpeechToText(ON_DEVICE) | ◯ 듣기 시작·종료 (에뮬레이터 마이크 입력은 미검증) |
+| NaviHelper 경로 요청·취소 | ◯ Pleos 내비에 쉼터 경로 표시, 출발 시 경로 정리 |
+| 등받이 젖힘·복귀 | ◯ Virtual Console 등받이 값 100 → 0 → 100 |
+| 공조 전원·외기·온도·풍량 | ◯ 22℃·내기 → 21℃·외기 → 20℃·풍량 5 → 복원 |
+| 운전석 창문, 앰비언트 조명, 문 잠김 | ◯ 창문 10%, 앰비언트 100% → 10% → 80% → 100% |
+| 트립 운전 시간 | ✕ 에뮬레이터가 지원하지 않음(ERROR_NOT_SUPPORTED_PROPERTY) → 앱이 기어로 연속 운전 시간을 직접 계산 |
+
+시연할 때 알아 둘 점:
+- Virtual Console 페이지가 열려 **활성 상태일 때만** 차량 값이 시뮬레이션됩니다(닫혀 있으면 `emulator_inactive`).
+- 에뮬레이터 기본 GPS는 미국이라 `adb emu geo fix`로 한국 고속도로 위치를 넣어야 쉼터가 잡힙니다.
+- 에뮬레이터 내비는 GPS와 별개로 자체 기본 위치(성남) 기준으로 경로를 그립니다.
+- Vehicle SDK로 읽는 등받이 위치 값은 에뮬레이터에서 0으로 고정돼, 복귀는 젖힌 시간만큼 되돌리는 방식으로 동작합니다.
 
 ## 사용 권한
 

@@ -352,7 +352,7 @@ private fun Suggest(s: UiState, listening: Boolean, a: Actions) {
                     val d = s.nextArea?.takeIf { it.area == area }?.distanceKm
                     if (d != null) append("${km(d)}km 앞 ")
                     withStyle(SpanStyle(color = Palette.Amber, fontWeight = FontWeight.Bold)) { append(area.displayName) }
-                    append("에서 15분만 쉬어 가요.")
+                    append("에서 잠깐 쉬어 가요.")
                 }
             },
             style = MaterialTheme.typography.bodyLarge.copy(fontSize = 26.sp, lineHeight = 38.sp),

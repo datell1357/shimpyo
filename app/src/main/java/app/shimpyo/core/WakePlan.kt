@@ -39,3 +39,22 @@ object VoiceIntent {
         return null
     }
 }
+
+/** 받침에 맞는 조사. */
+object Josa {
+    private fun hasBatchim(word: String): Boolean {
+        val c = word.trim().lastOrNull() ?: return false
+        if (c !in '가'..'힣') return false
+        return (c - '가') % 28 != 0
+    }
+
+    private fun hasRieulBatchim(word: String): Boolean {
+        val c = word.trim().lastOrNull() ?: return false
+        return c in '가'..'힣' && (c - '가') % 28 == 8
+    }
+
+    fun eulReul(word: String) = word + if (hasBatchim(word)) "을" else "를"
+
+    /** ㄹ 받침이거나 받침이 없으면 '로', 그 외 받침은 '으로'. */
+    fun ro(word: String) = word + if (hasBatchim(word) && !hasRieulBatchim(word)) "으로" else "로"
+}

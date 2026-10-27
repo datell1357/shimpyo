@@ -274,8 +274,8 @@ class ShimpyoController(
         _state.update { it.copy(phase = Phase.HEADING, target = area, arrived = false) }
         scope.launch {
             voice.say(
-                if (routed) "${area.displayName}을 경유지로 넣었어요. 도착해서 P단으로 바꾸면 쉼표를 시작할게요."
-                else "${area.displayName}로 가세요. 도착해서 P단으로 바꾸면 쉼표를 시작할게요."
+                if (routed) "${Josa.eulReul(area.displayName)} 경유지로 넣었어요. 도착해서 P단으로 바꾸면 쉼표를 시작할게요."
+                else "${Josa.ro(area.displayName)} 가세요. 도착해서 P단으로 바꾸면 쉼표를 시작할게요."
             )
         }
     }

@@ -6,6 +6,10 @@
 # AAOS Car API (런타임에 플랫폼이 제공)
 -dontwarn android.car.**
 
-# kotlinx.serialization (NaviHelper 데이터)
--keepattributes *Annotation*, InnerClasses
+# SDK가 쓰는 Gson TypeToken·kotlinx.serialization — 제네릭 시그니처를 남겨야 한다
+-keepattributes Signature, *Annotation*, InnerClasses, EnclosingMethod
+-keep class com.google.gson.reflect.TypeToken { *; }
+-keep class * extends com.google.gson.reflect.TypeToken
+-keep class com.google.gson.** { *; }
+-dontwarn com.google.gson.**
 -dontnote kotlinx.serialization.**

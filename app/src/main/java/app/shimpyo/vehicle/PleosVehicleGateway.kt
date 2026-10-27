@@ -494,7 +494,7 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
         const val TAG = "Shimpyo/Vehicle"
         const val CALL_TIMEOUT_MS = 3_000L
         const val SET_WAIT_MS = 600L
-        const val RECLINE_MS = 4_000L
+        const val RECLINE_MS = 3_000L
         const val DEFAULT_TEMP = 22f
     }
 }
