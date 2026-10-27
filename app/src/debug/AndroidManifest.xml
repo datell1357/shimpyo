@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- 디버그 빌드 전용: adb로 차량 호출을 하나씩 시험 -->
+        <receiver android:name=".DebugReceiver" android:exported="true" />
+    </application>
+</manifest>
