@@ -28,6 +28,7 @@ class DebugReceiver : BroadcastReceiver() {
                 "breeze" -> v.coolBreeze(last)
                 "cabin" -> v.restoreCabin(last)
                 "lock" -> v.lockDoors()
+                "occupancy" -> v.passengersPresent()
                 else -> "unknown"
             }
             Log.i("Shimpyo/Debug", "$cmd -> $r (${System.currentTimeMillis() - t0}ms)")

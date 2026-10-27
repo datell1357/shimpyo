@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.AirlineSeatReclineExtra
 import androidx.compose.material.icons.rounded.Bedtime
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.LocalCafe
 import androidx.compose.material.icons.rounded.LocalParking
 import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.Lock
@@ -94,12 +95,14 @@ class Actions(
     val restNow: () -> Unit,
     val startRest: (Int) -> Unit,
     val wakeNow: () -> Unit,
+    val awake: () -> Unit,
     val extend: () -> Unit,
     val depart: () -> Unit,
     val setDemo: (Boolean) -> Unit,
     val demoAdd: (Int) -> Unit,
     val simGear: ((Gear) -> Unit)?,
     val simBelt: ((Boolean) -> Unit)?,
+    val simDoor: ((Boolean) -> Unit)?,
 )
 
 @Composable
@@ -137,7 +140,8 @@ fun ShimpyoScreen(
                     }
                 }
             }
-            VoiceBar(spoken, heard, listening, dim = s.phase == Phase.RESTING)
+            VoiceBar(spoken, heard, listening, dim = s.phase == Phase.RESTING,
+                hint = if (s.askingAwake) "듣고 있어요 · ‘네’ 또는 ‘5분만 더’" else "듣고 있어요 · ‘응’ 또는 ‘아니’")
         }
         if (showSettings && !s.restricted) Settings(s, a, onClose = { showSettings = false })
     }
@@ -238,7 +242,7 @@ private fun Panel(modifier: Modifier = Modifier, content: @Composable ColumnScop
 }
 
 @Composable
-private fun VoiceBar(spoken: String?, heard: String?, listening: Boolean, dim: Boolean) {
+private fun VoiceBar(spoken: String?, heard: String?, listening: Boolean, dim: Boolean, hint: String) {
     val pulse = rememberInfiniteTransition(label = "mic").animateFloat(
         0.4f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "pulse",
     )
@@ -251,7 +255,7 @@ private fun VoiceBar(spoken: String?, heard: String?, listening: Boolean, dim: B
         if (listening) {
             Icon(Icons.Rounded.Mic, null, tint = Palette.Amber, modifier = Modifier.size(30.dp).alpha(pulse.value))
             Spacer(Modifier.width(14.dp))
-            Text(heard?.let { "“$it”" } ?: "듣고 있어요 · ‘응’ 또는 ‘아니’", style = MaterialTheme.typography.bodyLarge, color = Palette.Text)
+            Text(heard?.let { "“$it”" } ?: hint, style = MaterialTheme.typography.bodyLarge, color = Palette.Text)
         } else {
             Icon(Icons.AutoMirrored.Rounded.VolumeUp, null, tint = Palette.Sub, modifier = Modifier.size(28.dp))
             Spacer(Modifier.width(14.dp))
@@ -386,6 +390,16 @@ private fun Heading(s: UiState) {
             if (s.arrived) "도착했어요. P단으로 바꾸면 쉼표를 시작해요." else "도착해서 P단으로 바꾸면 쉼표를 시작해요.",
             style = MaterialTheme.typography.bodyLarge, color = Palette.Sub, textAlign = TextAlign.Center,
         )
+        Spacer(Modifier.height(20.dp))
+        // 카페인 냅: 커피를 마시고 바로 짧게 자면, 깰 때쯤 카페인 효과가 난다
+        Row(
+            Modifier.clip(RoundedCornerShape(50)).background(Palette.Amber.copy(alpha = 0.14f)).padding(horizontal = 20.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Rounded.LocalCafe, null, tint = Palette.Amber, modifier = Modifier.size(26.dp))
+            Spacer(Modifier.width(10.dp))
+            Text("커피가 있으면 쉬기 직전에 — 깰 때쯤 효과가 나요", style = MaterialTheme.typography.bodyLarge, color = Palette.Amber)
+        }
     }
 }
 
@@ -464,12 +478,16 @@ private fun Resting(s: UiState, a: Actions) {
             }
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(clock(s.restRemainingMs, s.demo), style = MaterialTheme.typography.displayLarge, color = Palette.Text.copy(alpha = 0.92f))
-                Text("쉼표 중", style = MaterialTheme.typography.titleLarge, color = Palette.Sub)
+                Text(if (s.paused) "문 열림 · 잠시 멈춤" else "쉼표 중", style = MaterialTheme.typography.titleLarge,
+                    color = if (s.paused) Palette.Amber else Palette.Sub)
             }
         }
         Spacer(Modifier.width(56.dp))
         Column(Modifier.widthIn(max = 560.dp)) {
-            Text("편하게 쉬세요", style = MaterialTheme.typography.headlineMedium, color = Palette.Text.copy(alpha = 0.9f))
+            Text(if (s.paused) "문을 닫으면 이어 가요" else "편하게 쉬세요", style = MaterialTheme.typography.headlineMedium,
+                color = Palette.Text.copy(alpha = 0.9f))
+            Spacer(Modifier.height(6.dp))
+            Text("깊은 잠에 들기 전에 깨워 개운하게 일어나요", style = MaterialTheme.typography.bodyMedium, color = Palette.Sub)
             Spacer(Modifier.height(14.dp))
             s.applied.forEach { Done(it) }
             s.manualHints.forEach { Hint(it) }
@@ -529,7 +547,11 @@ private fun Waking(s: UiState, a: Actions) {
                 }
             }
             Spacer(Modifier.height(20.dp))
-            BigButton("5분 더", primary = false, height = 76.dp, onClick = a.extend)
+            if (s.askingAwake) {
+                BigButton("깼어요", Modifier.fillMaxWidth(), height = 76.dp, onClick = a.awake)
+                Spacer(Modifier.height(14.dp))
+            }
+            BigButton("5분 더", Modifier.fillMaxWidth(), primary = false, height = 76.dp, onClick = a.extend)
         }
     }
 }
@@ -620,6 +642,13 @@ private fun Settings(s: UiState, a: Actions, onClose: () -> Unit) {
                         SmallAction("벨트 매기") { setBelt(true) }
                     }
                 }
+                a.simDoor?.let { setDoor ->
+                    Spacer(Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        SmallAction("문 열기") { setDoor(true) }
+                        SmallAction("문 닫기") { setDoor(false) }
+                    }
+                }
             }
             Spacer(Modifier.height(28.dp))
             Text("차량 기능", style = MaterialTheme.typography.titleMedium)
@@ -628,7 +657,7 @@ private fun Settings(s: UiState, a: Actions, onClose: () -> Unit) {
             listOf(
                 "시트 등받이" to f.seatRecline, "시트 통풍" to f.seatVentilation, "공조" to f.climate,
                 "창문" to f.window, "실내등" to f.cabinLight, "앰비언트 조명" to f.ambientLight,
-                "문 잠금" to f.doorLock, "안전벨트" to f.seatbelt, "트립 운전 시간" to f.tripTime, "EV 배터리" to f.evBattery,
+                "문 잠금" to f.doorLock, "문 열림 감지" to f.doorPosition, "동승자 감지" to f.seatOccupancy, "안전벨트" to f.seatbelt, "트립 운전 시간" to f.tripTime, "EV 배터리" to f.evBattery,
             ).forEach { (k, on) ->
                 Text("${if (on) "●" else "○"}  $k", style = MaterialTheme.typography.bodyMedium, color = if (on) Palette.Mint else Palette.Sub)
             }

@@ -13,6 +13,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import ai.pleos.playground.stt.constant.ErrorType as SttError
@@ -29,9 +31,14 @@ interface VoiceGateway {
     val lastHeard: StateFlow<String?>
     val listening: StateFlow<Boolean>
 
+    /** 음성 인식을 쓸 수 있는지. */
+    val canListen: Boolean
+
     suspend fun say(text: String)
+    /** 한 번 듣고 들은 문장을 돌려준다. 못 들음·시간 초과·취소 → null. */
+    suspend fun listen(timeoutMs: Long = 7_000): String?
     /** 예 → true, 아니오 → false, 못 알아들음·시간 초과 → null. */
-    suspend fun askYesNo(timeoutMs: Long = 7_000): Boolean?
+    suspend fun askYesNo(timeoutMs: Long = 7_000): Boolean? = listen(timeoutMs)?.let { VoiceIntent.parse(it) }
     fun cancelListening()
     fun chime()
     fun start()
@@ -53,6 +60,8 @@ class PleosVoiceGateway(context: Context) : VoiceGateway {
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
+    /** 안내가 겹치면 앞의 말이 끊기므로 한 번에 하나씩 말한다. */
+    private val sayLock = Mutex()
     private var speakDone: CompletableDeferred<Unit>? = null
 
     private var stt: SpeechToText? = null
@@ -132,7 +141,9 @@ class PleosVoiceGateway(context: Context) : VoiceGateway {
         runCatching { tone?.release() }
     }
 
-    override suspend fun say(text: String) {
+    override suspend fun say(text: String) = sayLock.withLock { speak(text) }
+
+    private suspend fun speak(text: String) {
         _spoken.value = text
         val budget = 1_500L + text.length * 120L
         val t = tts
@@ -154,7 +165,9 @@ class PleosVoiceGateway(context: Context) : VoiceGateway {
         }
     }
 
-    override suspend fun askYesNo(timeoutMs: Long): Boolean? {
+    override val canListen: Boolean get() = stt != null && sttReady
+
+    override suspend fun listen(timeoutMs: Long): String? {
         val s = stt
         if (s == null || !sttReady) return null
         _heard.value = null
@@ -164,7 +177,7 @@ class PleosVoiceGateway(context: Context) : VoiceGateway {
         val text = withTimeoutOrNull(timeoutMs) { pending.await() }
         runCatching { s.stop() }
         _listening.value = false
-        return text?.let { VoiceIntent.parse(it) }
+        return text
     }
 
     override fun cancelListening() {

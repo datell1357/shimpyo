@@ -1,0 +1,52 @@
+{
+  "packageName": "app.shimpyo",
+  "appDescription": "Shimpyo helps drowsy drivers take a short nap at highway drowsiness rest areas by preparing the seat, climate, window and lights, then waking them gently.",
+  "invokeWord": "쉼표",
+  "version": "0.2.0",
+  "actionCalls": [
+    {
+      "type": "function",
+      "function": {
+        "name": "START_REST_BREAK",
+        "description": "Starts a short nap break. When parked it reclines the driver seat and prepares the cabin, and when driving it adds the next drowsiness rest area ahead as a waypoint.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "minutes": {
+              "type": "number",
+              "description": "Length of the nap break in minutes, from 10 to 30."
+            }
+          },
+          "required": []
+        },
+        "component": "activity"
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "FIND_REST_AREA",
+        "description": "Finds the next drowsiness rest area ahead in the driving direction and tells its name and distance.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        },
+        "component": "service"
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "END_REST_BREAK",
+        "description": "Ends the current nap break, wakes the driver gently and restores the seat, climate, window and lights.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        },
+        "component": "activity"
+      }
+    }
+  ]
+}

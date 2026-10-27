@@ -1,7 +1,9 @@
 package app.shimpyo.ui
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -11,6 +13,7 @@ import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.shimpyo.ShimpyoApp
+import app.shimpyo.gleo.GleoActions
 
 class MainActivity : ComponentActivity() {
 
@@ -36,12 +39,14 @@ class MainActivity : ComponentActivity() {
             restNow = c::restNow,
             startRest = c::startRest,
             wakeNow = c::wakeNow,
+            awake = c::confirmAwake,
             extend = { c.extendRest(5) },
             depart = c::depart,
             setDemo = c::setDemo,
             demoAdd = c::demoAddDriving,
             simGear = c.sim?.let { sim -> sim::setGear },
             simBelt = c.sim?.let { sim -> sim::setSeatbelt },
+            simDoor = c.sim?.let { sim -> sim::setDoorOpen },
         )
         setContent {
             ShimpyoTheme {
@@ -52,12 +57,23 @@ class MainActivity : ComponentActivity() {
                 ShimpyoScreen(state, spoken, heard, listening, actions)
             }
         }
+        if (savedInstanceState == null) handleGleo(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleGleo(intent)
+    }
+
+    /** Gleo AI 음성 명령으로 열린 경우(component = activity). */
+    private fun handleGleo(intent: Intent?) {
+        if (intent != null && GleoActions.isGleo(intent)) GleoActions.handle(this, intent)
     }
 
     private companion object {
-        val RUNTIME_PERMISSIONS = listOf(
-            "pleos.car.permission.FUSED_LOCATION", // 보호 수준 dangerous
-            Manifest.permission.ACCESS_FINE_LOCATION, // FusedLocation 미지원 환경의 대체 경로
-        )
+        val RUNTIME_PERMISSIONS = ShimpyoApp.LOCATION_PERMISSIONS +
+            // 쉼표 지킴이(포그라운드 서비스) 알림
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) listOf(Manifest.permission.POST_NOTIFICATIONS) else emptyList()
     }
 }

@@ -12,9 +12,12 @@ class SimVehicleGateway : VehicleGateway {
     private val _gear = MutableStateFlow(Gear.DRIVE)
     private val _belt = MutableStateFlow<Boolean?>(true)
     private val _battery = MutableStateFlow<Int?>(72)
+    private val _door = MutableStateFlow<Boolean?>(false)
 
     override val connected: StateFlow<Boolean> = MutableStateFlow(true)
+    override val ready: StateFlow<Boolean> = MutableStateFlow(true)
     override val gear: StateFlow<Gear> = _gear
+    override val doorOpen: StateFlow<Boolean?> = _door
     override val tripDrivingMinutes: StateFlow<Int?> = MutableStateFlow(null)
     override val driverSeatbeltBuckled: StateFlow<Boolean?> = _belt
     override val batteryPercent: StateFlow<Int?> = _battery
@@ -22,12 +25,13 @@ class SimVehicleGateway : VehicleGateway {
         CabinFeatures(
             seatRecline = true, seatVentilation = true, seatbelt = true, seatOccupancy = false,
             climate = true, window = true, cabinLight = true, ambientLight = true, doorLock = true,
-            evBattery = true, tripTime = false,
+            doorPosition = true, evBattery = true, tripTime = false,
         )
     )
 
     fun setGear(g: Gear) { _gear.value = g }
     fun setSeatbelt(on: Boolean) { _belt.value = on }
+    fun setDoorOpen(open: Boolean) { _door.value = open }
 
     override suspend fun passengersPresent(): Boolean? = null
     override suspend fun snapshot() = CabinSnapshot(backrest = 0, temperature = 22f, fanSpeed = 3, window = 0)

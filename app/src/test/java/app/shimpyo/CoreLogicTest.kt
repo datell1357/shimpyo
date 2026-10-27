@@ -1,13 +1,21 @@
 package app.shimpyo
 
+import app.shimpyo.core.CommandResult
 import app.shimpyo.core.ContinuousDrivingTracker
 import app.shimpyo.core.Geo
+import app.shimpyo.core.Phase
+import app.shimpyo.core.RestAreaHit
 import app.shimpyo.core.RestAreaRepository
 import app.shimpyo.core.RestPolicy
+import app.shimpyo.core.RestSession
 import app.shimpyo.core.ShimpyoController
 import app.shimpyo.core.VoiceIntent
+import app.shimpyo.core.WakeAnswer
 import app.shimpyo.core.WakePlan
 import app.shimpyo.core.WakeStep
+import app.shimpyo.gleo.GleoReply
+import app.shimpyo.vehicle.CabinSnapshot
+import app.shimpyo.vehicle.passengersFrom
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -110,5 +118,65 @@ class CoreLogicTest {
         assertEquals("40분", ShimpyoController.durationText(40))
         assertEquals("2시간", ShimpyoController.durationText(120))
         assertEquals("1시간 50분", ShimpyoController.durationText(110))
+    }
+
+    private fun session(phase: Phase = Phase.RESTING, endAt: Long = 1_200_000L, paused: Long? = null, savedAt: Long = 100_000L) =
+        RestSession(
+            phase = phase, startedAt = 0L, endAt = endAt, pausedRemainingMs = paused, minutes = 20,
+            seatReclined = true, passengers = false, placeName = "옥산 졸음쉼터",
+            applied = listOf("운전석 등받이 젖힘", "외기 유입 · 1℃ 낮춤"), savedAt = savedAt,
+            snapshot = CabinSnapshot(backrest = 100, climatePower = true, temperature = 22.5f, fanSpeed = 3,
+                recirculation = true, window = 0, cabinLightSwitch = "AUTOMATIC", ambientBrightness = 80, ventilation = null),
+        )
+
+    @Test fun `쉼표 상태를 저장했다가 그대로 되살린다`() {
+        val s = session(paused = 300_000L)
+        assertEquals(s, RestSession.decode(s.encode()))
+        assertNull(RestSession.decode("phase=NOPE"))
+    }
+
+    @Test fun `앱이 다시 켜지면 30분 안이면 이어 가고, 오래 지났으면 되돌리기만`() {
+        val s = session()
+        assertEquals(RestSession.Resume.CONTINUE, s.resumeAction(now = 600_000L))                 // 쉼표 도중
+        assertEquals(RestSession.Resume.CONTINUE, s.resumeAction(now = 1_200_000L + 29 * 60_000L)) // 끝나고 29분
+        assertEquals(RestSession.Resume.RESTORE, s.resumeAction(now = 1_200_000L + 31 * 60_000L))
+        // 문 열림으로 멈춘 쉼표·출발 준비는 마지막 저장 시각 기준
+        assertEquals(RestSession.Resume.CONTINUE, session(paused = 60_000L).resumeAction(now = 100_000L + 10 * 60_000L))
+        assertEquals(RestSession.Resume.RESTORE, session(Phase.DEPARTING).resumeAction(now = 100_000L + 40 * 60_000L))
+    }
+
+    @Test fun `깨운 뒤 대답 알아듣기`() {
+        assertEquals(WakeAnswer.AWAKE, VoiceIntent.parseWake("네"))
+        assertEquals(WakeAnswer.AWAKE, VoiceIntent.parseWake("응 깼어"))
+        assertEquals(WakeAnswer.AWAKE, VoiceIntent.parseWake("일어났어요"))
+        assertEquals(WakeAnswer.MORE, VoiceIntent.parseWake("아직 안 깼어"))
+        assertEquals(WakeAnswer.MORE, VoiceIntent.parseWake("5분만 더"))
+        assertEquals(WakeAnswer.MORE, VoiceIntent.parseWake("조금 더"))
+        assertEquals(WakeAnswer.MORE, VoiceIntent.parseWake("너무 졸려"))
+        assertNull(VoiceIntent.parseWake("음"))
+    }
+
+    @Test fun `동승자 판단 — 운전석 값을 착석 기준으로`() {
+        val f: (Boolean?, List<Boolean?>) -> Boolean? = { d, o -> passengersFrom(d, o) }
+        // SDK가 착석을 true로 주는 경우
+        assertEquals(true, f(true, listOf(false, false, false, true)))
+        assertEquals(false, f(true, listOf(false, false, false, false)))
+        // 에뮬레이터처럼 뜻이 반대로 나오는 경우(빈 좌석 true, 앉은 좌석 false)
+        assertEquals(false, f(false, listOf(true, true, true, true)))
+        assertEquals(true, f(false, listOf(true, true, true, false)))
+        // 모르면 null
+        assertNull(f(null, listOf(true, false)))
+        assertNull(f(true, listOf(null, null)))
+    }
+
+    @Test fun `Gleo 응답은 규격대로 영어 문장과 상태`() {
+        val hit = RestAreaHit(repo.areas.first { it.name == "옥산" }, 8.04)
+        val routed = GleoReply.of(CommandResult.Routed(hit))
+        assertEquals("success", routed.status)
+        assertEquals("Added 옥산 졸음쉼터, 8.0 km ahead, as a waypoint.", routed.message)
+        assertEquals(8.0, routed.data?.get("distanceKm"))
+        assertEquals("fail", GleoReply.of(CommandResult.NoArea).status)
+        assertEquals("fail", GleoReply.of(CommandResult.NotResting).status)
+        assertEquals("success", GleoReply.of(CommandResult.RestStarted(15)).status)
     }
 }

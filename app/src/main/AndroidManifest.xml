@@ -31,6 +31,11 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!-- 쉼표 지킴이: 다른 앱이 앞에 있어도 연속 운전·쉼터 도착·깨우기 타이머가 멈추지 않게 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:name=".ShimpyoApp"
         android:allowBackup="false"
@@ -52,6 +57,24 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Gleo AI 음성 명령(assets/schema.json, component = activity) -->
+            <intent-filter>
+                <action android:name="START_REST_BREAK" />
+                <action android:name="END_REST_BREAK" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
         </activity>
+
+        <!-- Gleo AI 음성 명령 중 화면이 필요 없는 것(component = service) -->
+        <receiver android:name=".gleo.GleoActionReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="FIND_REST_AREA" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name=".TripService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
     </application>
 </manifest>

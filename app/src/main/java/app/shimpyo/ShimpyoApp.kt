@@ -46,5 +46,19 @@ class ShimpyoApp : Application() {
         if (started) return
         started = true
         controller.start()
+        TripService.start(this)
+    }
+
+    /** 화면 없이 깨어났을 때(서비스 재시작, Gleo 명령): 권한이 이미 있을 때만 시작한다. */
+    fun startIfPermitted() {
+        val granted = LOCATION_PERMISSIONS.any { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
+        if (granted) startOnce()
+    }
+
+    companion object {
+        val LOCATION_PERMISSIONS = listOf(
+            "pleos.car.permission.FUSED_LOCATION", // 보호 수준 dangerous
+            android.Manifest.permission.ACCESS_FINE_LOCATION, // FusedLocation 미지원 환경의 대체 경로
+        )
     }
 }

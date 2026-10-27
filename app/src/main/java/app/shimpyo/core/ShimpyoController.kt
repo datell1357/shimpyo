@@ -1,6 +1,7 @@
 package app.shimpyo.core
 
 import android.content.SharedPreferences
+import android.util.Log
 import app.shimpyo.location.Fix
 import app.shimpyo.location.LocationGateway
 import app.shimpyo.navi.NaviGateway
@@ -15,10 +16,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Calendar
+import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -50,7 +54,24 @@ data class UiState(
     val restsToday: Int = 0,
     val restMinutesToday: Int = 0,
     val busy: Boolean = false,
+    /** 쉼표 중 문이 열려 시간을 멈춘 상태. */
+    val paused: Boolean = false,
+    /** 알람 뒤 "깨셨어요?"를 묻는 중. */
+    val askingAwake: Boolean = false,
+    /** 동승자가 있어 운전석만 맞춘 쉼표. */
+    val passengers: Boolean = false,
 )
+
+/** 음성 비서(Gleo) 명령을 처리한 결과. */
+sealed class CommandResult {
+    data class RestStarted(val minutes: Int) : CommandResult()
+    data class Routed(val hit: RestAreaHit) : CommandResult()
+    data class Found(val hit: RestAreaHit) : CommandResult()
+    data object AlreadyResting : CommandResult()
+    data object NoArea : CommandResult()
+    data object Waking : CommandResult()
+    data object NotResting : CommandResult()
+}
 
 /**
  * 쉼표의 흐름 전체: 연속 운전 판단 → 쉼터 제안 → 경유 → 쉼표 모드 → 깨우기 → 출발 확인.
@@ -76,6 +97,7 @@ class ShimpyoController(
     val sim: SimVehicleGateway? = vehicle as? SimVehicleGateway
 
     private val tracker = ContinuousDrivingTracker(policy)
+    private val sessions = SessionStore(prefs)
     private var suggestionsThisTrip = 0
     private var lastDeclineAt: Long? = null
     private var snapshot: CabinSnapshot = CabinSnapshot()
@@ -84,13 +106,27 @@ class ShimpyoController(
     private var tripBaseline = 0
     private var flowJob: Job? = null
     private val wakeJobs = mutableMapOf<WakeStep, Job>()
+    /** 등받이를 젖힌 채인지. 이미 세운 시트를 한 번 더 움직이지 않게 한다. */
+    private var seatReclined = false
+    /** 문이 열려 멈춘 동안의 남은 시간. */
+    private var pausedRemaining: Long? = null
+    private var awakeTapped = false
+    /** 주행 기어라 등받이를 못 세웠다 — P단이 되면 세운다. */
+    private var seatRestorePending = false
 
     private val minuteMillis: Long get() = if (_state.value.demo) DEMO_MINUTE_MS else 60_000L
 
     fun start() {
         vehicle.start(); navi.start(); location.start(); voice.start(); restrictions?.start()
-        scope.launch { navi.arrivedAtRestStop.collect { onArrived() } }
+        scope.launch { navi.arrivedAtRestStop.collect { onArrived("navi") } }
+        scope.launch { location.arrivals.collect { onArrived("proximity") } }
         scope.launch { vehicle.gear.collect { onGear(it) } }
+        scope.launch { vehicle.doorOpen.collect { onDoor(it == true) } }
+        scope.launch {
+            // 앱이 쉼표 도중에 꺼졌다면, 차량 기능 확인이 끝난 뒤 이어 가거나 되돌린다
+            awaitReady()
+            sessions.load()?.let { resume(it) }
+        }
         scope.launch {
             while (isActive) {
                 tick()
@@ -102,6 +138,11 @@ class ShimpyoController(
 
     fun stop() {
         vehicle.stop(); navi.stop(); location.stop(); voice.stop(); restrictions?.stop()
+    }
+
+    /** 차량 기능 확인이 끝날 때까지(최대 [READY_WAIT_MS]). */
+    suspend fun awaitReady(timeoutMs: Long = READY_WAIT_MS) {
+        withTimeoutOrNull(timeoutMs) { vehicle.ready.first { it } }
     }
 
     // ---------------- 화면에서 부르는 동작 ----------------
@@ -116,6 +157,7 @@ class ShimpyoController(
     fun declineSuggestion() {
         voice.cancelListening()
         flowJob?.cancel()
+        location.clearArrival()
         lastDeclineAt = clock()
         _state.update { it.copy(phase = Phase.DRIVING, target = null) }
         scope.launch { voice.say("알겠어요. ${policy.retryAfterDeclineMin}분 뒤에 한 번만 더 여쭤볼게요.") }
@@ -145,21 +187,38 @@ class ShimpyoController(
 
     /** 바로 깨우기 단계로. */
     fun wakeNow() {
-        if (_state.value.phase == Phase.RESTING || _state.value.phase == Phase.WAKING) restEndAt = clock()
+        if (_state.value.phase == Phase.RESTING || _state.value.phase == Phase.WAKING) {
+            pausedRemaining = null
+            _state.update { it.copy(paused = false) }
+            restEndAt = clock()
+        }
+    }
+
+    /** 알람 뒤 "깼어요" 버튼. */
+    fun confirmAwake() {
+        if (!_state.value.askingAwake) return
+        awakeTapped = true
+        voice.cancelListening()
     }
 
     fun extendRest(minutes: Int = 5) {
         val phase = _state.value.phase
         if (phase != Phase.WAKING && phase != Phase.DEPARTING) return
         cancelWake()
+        voice.cancelListening()
         restEndAt = clock() + minutes * minuteMillis
         _state.update {
             it.copy(phase = Phase.RESTING, restTotalMs = restEndAt - restStartedAt, wakeDone = emptySet(),
-                restMinutes = it.restMinutes + minutes)
+                restMinutes = it.restMinutes + minutes, askingAwake = false)
         }
+        persist()
         flowJob = scope.launch {
             voice.say("${minutes}분 더 쉬어요.")
-            vehicle.reclineDriverSeat()
+            // 깨우기 도중이면 시트가 아직 젖혀져 있을 수 있다
+            if (!seatReclined) {
+                seatReclined = true; persist()
+                if (!vehicle.reclineDriverSeat()) { seatReclined = false; persist() }
+            }
             vehicle.setRestClimate(snapshot)
             vehicle.dimCabin()
         }
@@ -167,6 +226,55 @@ class ShimpyoController(
 
     fun depart() {
         if (_state.value.phase == Phase.DEPARTING) finishRest()
+    }
+
+    // ---------------- Gleo 음성 명령 ----------------
+
+    /** "쉬어 갈래": 정차 중이면 바로 쉼표, 주행 중이면 앞쪽 쉼터를 경유지로. */
+    fun commandStartRest(minutes: Int?): CommandResult {
+        val s = _state.value
+        val m = (minutes ?: DEFAULT_REST_MIN).coerceIn(10, 30)
+        return when {
+            s.phase == Phase.RESTING || s.phase == Phase.WAKING -> {
+                scope.launch { voice.say("지금 쉼표 중이에요.") }
+                CommandResult.AlreadyResting
+            }
+            vehicle.gear.value.isDriving -> {
+                val hit = s.nextArea ?: run {
+                    scope.launch { voice.say("앞쪽에 가까운 졸음쉼터를 찾지 못했어요. 다음 휴게소에서 쉬어 가세요.") }
+                    return CommandResult.NoArea
+                }
+                voice.cancelListening()
+                flowJob?.cancel()
+                goTo(hit.area)
+                CommandResult.Routed(hit)
+            }
+            s.phase == Phase.DEPARTING -> { extendRest(m); CommandResult.RestStarted(m) }
+            else -> { startRest(m); CommandResult.RestStarted(m) }
+        }
+    }
+
+    /** "가까운 졸음쉼터 어디야". */
+    fun commandFindArea(): CommandResult {
+        val hit = _state.value.nextArea
+        scope.launch {
+            voice.say(
+                if (hit == null) "앞쪽에 가까운 졸음쉼터를 찾지 못했어요."
+                else "${hit.distanceKm.roundToInt().coerceAtLeast(1)}킬로미터 앞에 ${hit.area.displayName}가 있어요." +
+                    if (hit.area.hasToilet) " 화장실도 있어요." else ""
+            )
+        }
+        return hit?.let { CommandResult.Found(it) } ?: CommandResult.NoArea
+    }
+
+    /** "그만 깰래". */
+    fun commandEndRest(): CommandResult = when (_state.value.phase) {
+        Phase.RESTING, Phase.WAKING -> { wakeNow(); CommandResult.Waking }
+        Phase.DEPARTING -> CommandResult.Waking
+        else -> {
+            scope.launch { voice.say("지금은 쉼표 중이 아니에요.") }
+            CommandResult.NotResting
+        }
     }
 
     fun setDemo(on: Boolean) {
@@ -202,14 +310,16 @@ class ShimpyoController(
         val hour = Calendar.getInstance().apply { timeInMillis = now }.get(Calendar.HOUR_OF_DAY)
         val belt = vehicle.driverSeatbeltBuckled.value
 
-        val remaining = max(0L, restEndAt - now)
+        val remaining = pausedRemaining ?: max(0L, restEndAt - now)
+        val arrivedByDistance = s.phase == Phase.HEADING && targetKm != null && targetKm < ARRIVE_KM
+        if (arrivedByDistance && !s.arrived) Log.i(TAG, "arrived via distance (${"%.2f".format(targetKm)}km)")
         val ns = s.copy(
             gear = gear,
             continuousMin = tracker.continuousMinutes(mm),
             thresholdMin = policy.thresholdFor(hour),
             nextArea = next,
             targetDistanceKm = targetKm,
-            arrived = s.arrived || (s.phase == Phase.HEADING && targetKm != null && targetKm < ARRIVE_KM),
+            arrived = s.arrived || arrivedByDistance,
             restRemainingMs = if (s.phase == Phase.RESTING || s.phase == Phase.WAKING) remaining else s.restRemainingMs,
             seatbelt = belt,
             beltWasOff = s.beltWasOff || (resting && belt == false),
@@ -231,7 +341,7 @@ class ShimpyoController(
                     suggest(next, ns.continuousMin)
                 }
             }
-            Phase.RESTING, Phase.WAKING -> {
+            Phase.RESTING, Phase.WAKING -> if (pausedRemaining == null && !ns.busy) {
                 lowBatteryCheck(remaining)
                 val due = WakePlan.dueSteps(remaining, ns.wakeDone, mm)
                 if (due.isNotEmpty()) runWake(due)
@@ -271,22 +381,54 @@ class ShimpyoController(
 
     private fun goTo(area: RestArea) {
         val routed = navi.goVia(area)
+        // 도착 판정: 플랫폼 근접 알림(FusedLocation), 안 되면 tick에서 거리로
+        val watching = location.watchArrival(area.lat, area.lon, (ARRIVE_KM * 1000).toFloat())
+        Log.i(TAG, "heading to ${area.displayName}, routed=$routed proximity=$watching")
         _state.update { it.copy(phase = Phase.HEADING, target = area, arrived = false) }
         scope.launch {
             voice.say(
-                if (routed) "${Josa.eulReul(area.displayName)} 경유지로 넣었어요. 도착해서 P단으로 바꾸면 쉼표를 시작할게요."
-                else "${Josa.ro(area.displayName)} 가세요. 도착해서 P단으로 바꾸면 쉼표를 시작할게요."
+                (if (routed) "${Josa.eulReul(area.displayName)} 경유지로 넣었어요." else "${Josa.ro(area.displayName)} 가세요.") +
+                    " 도착해서 P단으로 바꾸면 쉼표를 시작할게요. 커피가 있으면 쉬기 직전에 드세요. 깰 때쯤 효과가 나요."
             )
         }
     }
 
-    private fun onArrived() {
-        if (_state.value.phase == Phase.HEADING) _state.update { it.copy(arrived = true) }
+    private fun onArrived(source: String) {
+        val s = _state.value
+        if (s.phase == Phase.HEADING) {
+            if (!s.arrived) Log.i(TAG, "arrived via $source")
+            _state.update { it.copy(arrived = true) }
+        }
         if (vehicle.gear.value == Gear.PARK) onGear(Gear.PARK)
+    }
+
+    /** 쉼표 중 문이 열리면(화장실 등) 시간을 멈추고, 닫히면 남은 시간으로 이어 간다. */
+    private fun onDoor(open: Boolean) {
+        val s = _state.value
+        val now = clock()
+        if (open && s.phase == Phase.RESTING && pausedRemaining == null && !s.busy) {
+            pausedRemaining = max(0L, restEndAt - now)
+            _state.update { it.copy(paused = true) }
+            persist()
+            Log.i(TAG, "door open: paused with ${pausedRemaining}ms left")
+            scope.launch { voice.say("문이 열려서 쉼표를 잠시 멈췄어요. 문을 닫으면 이어 갈게요.") }
+        } else if (!open && pausedRemaining != null) {
+            val left = pausedRemaining ?: 0L
+            pausedRemaining = null
+            restEndAt = now + left
+            _state.update { it.copy(paused = false) }
+            persist()
+            Log.i(TAG, "door closed: resumed with ${left}ms left")
+            if (s.phase == Phase.RESTING) {
+                val min = ceil(left.toDouble() / minuteMillis).toInt().coerceAtLeast(1)
+                scope.launch { voice.say("다시 쉼표를 이어 갈게요. ${min}분 남았어요.") }
+            }
+        }
     }
 
     private fun onGear(gear: Gear) {
         val s = _state.value
+        if (gear == Gear.PARK && seatRestorePending) scope.launch { finishPendingSeatRestore() }
         when {
             gear == Gear.PARK && (s.phase == Phase.DRIVING || s.phase == Phase.HEADING) -> {
                 val fromHeading = s.phase == Phase.HEADING
@@ -296,6 +438,7 @@ class ShimpyoController(
             gear.isDriving && s.phase == Phase.PARKED -> {
                 voice.cancelListening()
                 flowJob?.cancel()
+                if (s.arrived) location.clearArrival()
                 _state.update {
                     it.copy(phase = if (it.target != null && !it.arrived) Phase.HEADING else Phase.DRIVING,
                         target = if (it.arrived) null else it.target, arrived = false)
@@ -311,29 +454,40 @@ class ShimpyoController(
         flowJob?.cancel()
         flowJob = scope.launch {
             val where = _state.value.target?.displayName?.let { "${it}에 " } ?: ""
-            voice.say("${where}도착했어요. 20분 쉼표 시작할까요?")
+            voice.say("${where}도착했어요. ${DEFAULT_REST_MIN}분 쉼표 시작할까요?")
             if (_state.value.phase != Phase.PARKED) return@launch
-            if (voice.askYesNo() == true) beginRest(20)
+            if (voice.askYesNo() == true) beginRest(DEFAULT_REST_MIN)
         }
     }
 
     private suspend fun beginRest(minutes: Int) {
         val t0 = clock()
-        _state.update { it.copy(busy = true, restMinutes = minutes) }
+        location.clearArrival()
+        pausedRemaining = null
+        _state.update { it.copy(busy = true, restMinutes = minutes, paused = false) }
         voice.say("${minutes}분 쉼표 시작할게요. 시트와 공기를 맞출게요.")
         val snap = vehicle.snapshot()
         snapshot = snap
+        val passengers = vehicle.passengersPresent() == true
+        restStartedAt = clock()
+        restEndAt = restStartedAt + minutes * minuteMillis
+        // 시트를 움직이기 전에 먼저 저장 — 도중에 앱이 꺼져도 다시 켜질 때 되돌릴 수 있게
+        _state.update { it.copy(phase = Phase.RESTING, passengers = passengers) }
+        seatReclined = true
+        persist()
+
         val applied = mutableListOf<String>()
         val hints = mutableListOf<String>()
         if (vehicle.lockDoors()) applied += "문 잠김 확인"
-        if (vehicle.reclineDriverSeat()) applied += "운전석 등받이 젖힘" else hints += "등받이를 편하게 젖혀 주세요"
+        if (vehicle.reclineDriverSeat()) applied += "운전석 등받이 젖힘" else { seatReclined = false; hints += "등받이를 편하게 젖혀 주세요" }
         if (vehicle.setRestClimate(snap)) applied += "외기 유입 · 1℃ 낮춤" else hints += "공조를 외기 모드로 바꿔 주세요"
-        if (vehicle.openWindowSlightly()) applied += "운전석 창문 살짝"
+        if (passengers) applied += "동승자가 있어 창문은 그대로"
+        else if (vehicle.openWindowSlightly()) applied += "운전석 창문 살짝"
         if (vehicle.dimCabin()) applied += "실내 조명 낮춤"
 
         restStartedAt = clock()
         restEndAt = restStartedAt + minutes * minuteMillis
-        android.util.Log.i("Shimpyo/Flow", "rest started after ${restStartedAt - t0}ms, applied=$applied hints=$hints")
+        Log.i(TAG, "rest started after ${restStartedAt - t0}ms, passengers=$passengers applied=$applied hints=$hints")
         _state.update {
             it.copy(
                 phase = Phase.RESTING, restTotalMs = restEndAt - restStartedAt, restRemainingMs = restEndAt - restStartedAt,
@@ -341,6 +495,8 @@ class ShimpyoController(
                 beltWasOff = it.seatbelt == false,
             )
         }
+        persist()
+        if (passengers) voice.say("동승자가 있어서 창문은 그대로 두고 운전석만 맞췄어요.")
         if (hints.isNotEmpty()) voice.say(hints.joinToString(". ") + ".")
         voice.say("푹 쉬세요. ${minutes}분 뒤에 천천히 깨워 드릴게요.")
     }
@@ -348,21 +504,61 @@ class ShimpyoController(
     /** 단계마다 따로 실행해 서로 막지 않게 한다. 알람만 시트가 다 돌아온 뒤에 울린다. */
     private fun runWake(steps: List<WakeStep>) {
         _state.update { it.copy(phase = Phase.WAKING, wakeDone = it.wakeDone + steps) }
+        persist()
         for (step in steps) {
             wakeJobs[step] = scope.launch {
                 when (step) {
                     WakeStep.LIGHT -> vehicle.brightenAmbient()
                     WakeStep.AIR -> vehicle.coolBreeze(snapshot)
-                    WakeStep.SEAT -> vehicle.restoreDriverSeat(snapshot)
+                    WakeStep.SEAT -> restoreSeatIfReclined()
                     WakeStep.ALARM -> {
                         wakeJobs[WakeStep.SEAT]?.join()
-                        voice.chime()
-                        voice.say("일어날 시간이에요. 기지개 한 번 켜고, 물 한 모금 마셔요.")
-                        enterDeparting()
+                        askAwake()
                     }
                 }
             }
         }
+    }
+
+    /** 알람 뒤 깼는지 묻는다. 대답이 없으면 두 번 더 깨우고, "더 잘래"면 5분 더. */
+    private suspend fun askAwake() {
+        awakeTapped = false
+        _state.update { it.copy(askingAwake = true) }
+        var answer: WakeAnswer? = null
+        for (attempt in 0 until AWAKE_TRIES) {
+            // 동승자가 자고 있을 수 있으면 경고음 없이 빛·바람·시트와 음성으로만
+            if (!_state.value.passengers) voice.chime()
+            voice.say(if (attempt == 0) "일어날 시간이에요. 깨셨으면 '네'라고 말해 주세요." else "일어나실 시간이에요. 깨셨으면 대답해 주세요.")
+            if (awakeTapped) { answer = WakeAnswer.AWAKE; break }
+            if (!voice.canListen) break
+            val heard = voice.listen(AWAKE_LISTEN_MS)
+            answer = if (awakeTapped) WakeAnswer.AWAKE else heard?.let(VoiceIntent::parseWake)
+            Log.i(TAG, "awake check ${attempt + 1}: heard=$heard -> $answer")
+            if (answer != null) break
+        }
+        _state.update { it.copy(askingAwake = false) }
+        if (answer == WakeAnswer.MORE) {
+            extendRest(5)
+            return
+        }
+        voice.say((if (answer == WakeAnswer.AWAKE) "좋아요. " else "") + "기지개 한 번 켜고, 물 한 모금 마셔요.")
+        enterDeparting()
+    }
+
+    /** 젖힌 등받이를 세운다. 차량이 거부하면 false. */
+    private suspend fun restoreSeatIfReclined(): Boolean {
+        if (!seatReclined) return true
+        if (!vehicle.restoreDriverSeat(snapshot)) return false
+        seatReclined = false
+        persist()
+        return true
+    }
+
+    private suspend fun finishPendingSeatRestore() {
+        if (!seatRestorePending || !restoreSeatIfReclined()) return
+        seatRestorePending = false
+        sessions.clear()
+        voice.say("등받이를 원래대로 세웠어요.")
     }
 
     private fun cancelWake() {
@@ -372,6 +568,8 @@ class ShimpyoController(
 
     private suspend fun enterDeparting() {
         _state.update { it.copy(phase = Phase.DEPARTING) }
+        persist()
+        restoreSeatIfReclined()
         vehicle.restoreCabin(snapshot)
         val belt = vehicle.driverSeatbeltBuckled.value
         voice.say(
@@ -388,6 +586,8 @@ class ShimpyoController(
         flowJob?.cancel()
         flowJob = scope.launch {
             navi.clearRestStop()
+            location.clearArrival()
+            sessions.clear()
             log.add(RestRecord(restStartedAt, s.restMinutes, s.target?.displayName))
             tracker.reset()
             tripBaseline = vehicle.tripDrivingMinutes.value ?: 0
@@ -395,7 +595,7 @@ class ShimpyoController(
             lastDeclineAt = null
             _state.update {
                 it.copy(phase = Phase.DRIVING, target = null, arrived = false, applied = emptyList(),
-                    manualHints = emptyList(), wakeDone = emptySet(), beltWasOff = false)
+                    manualHints = emptyList(), wakeDone = emptySet(), beltWasOff = false, passengers = false)
             }
             refreshToday()
             voice.say("출발해도 좋아요. 원래 길로 안내를 이어 갈게요.")
@@ -405,13 +605,78 @@ class ShimpyoController(
     private fun abortRest(message: String) {
         flowJob?.cancel()
         cancelWake()
-        _state.update { it.copy(phase = Phase.DRIVING, applied = emptyList(), wakeDone = emptySet(), target = null) }
-        navi.clearRestStop()
-        scope.launch {
-            vehicle.restoreDriverSeat(snapshot)
-            vehicle.restoreCabin(snapshot)
-            voice.say(message)
+        voice.cancelListening()
+        pausedRemaining = null
+        _state.update {
+            it.copy(phase = Phase.DRIVING, applied = emptyList(), wakeDone = emptySet(), target = null,
+                paused = false, askingAwake = false, passengers = false)
         }
+        navi.clearRestStop()
+        location.clearArrival()
+        scope.launch {
+            val seatOk = restoreSeatIfReclined()
+            vehicle.restoreCabin(snapshot)
+            if (seatOk) {
+                sessions.clear()
+                voice.say(message)
+            } else {
+                // 저장된 쉼표는 지우지 않는다 — 앱이 다시 켜져도 등받이를 세울 수 있게
+                seatRestorePending = true
+                voice.say("쉼표를 멈췄어요. 등받이가 젖혀져 있어요. P단에서 등받이를 세운 뒤 출발하세요.")
+            }
+        }
+    }
+
+    /** 앱이 다시 켜졌을 때 저장된 쉼표를 이어 가거나, 오래 지났거나 이미 출발했으면 되돌리기만 한다. */
+    private suspend fun resume(saved: RestSession) {
+        val now = clock()
+        snapshot = saved.snapshot
+        seatReclined = saved.seatReclined
+        restStartedAt = saved.startedAt
+        restEndAt = saved.endAt
+        val driving = vehicle.gear.value.isDriving
+        if (driving || saved.resumeAction(now) == RestSession.Resume.RESTORE) {
+            Log.i(TAG, "resume: restore only (saved ${saved.phase}, driving=$driving)")
+            val seatOk = restoreSeatIfReclined()
+            vehicle.restoreCabin(snapshot)
+            log.add(RestRecord(saved.startedAt, saved.minutes, saved.placeName))
+            refreshToday()
+            if (seatOk) {
+                sessions.clear()
+                voice.say("지난 쉼표 때 바꾼 시트와 공조를 원래대로 되돌렸어요.")
+            } else {
+                seatRestorePending = true
+                voice.say("지난 쉼표 때 젖힌 등받이가 그대로예요. P단에서 등받이를 세운 뒤 출발하세요.")
+            }
+            return
+        }
+        pausedRemaining = saved.pausedRemainingMs
+        val area = saved.placeName?.let { n -> areas.areas.firstOrNull { it.displayName == n } }
+        Log.i(TAG, "resume: continue ${saved.phase}, ${(saved.endAt - now) / 1000}s left, seatReclined=$seatReclined")
+        // 깨우는 중이었으면 남은 단계를 처음부터 다시(시트는 seatReclined로 한 번만 움직인다)
+        _state.update {
+            it.copy(
+                phase = if (saved.phase == Phase.DEPARTING) Phase.DEPARTING else Phase.RESTING,
+                target = area, arrived = true, restMinutes = saved.minutes,
+                restTotalMs = saved.endAt - saved.startedAt, restRemainingMs = pausedRemaining ?: max(0L, saved.endAt - now),
+                applied = saved.applied, manualHints = emptyList(), wakeDone = emptySet(),
+                paused = pausedRemaining != null, passengers = saved.passengers, beltWasOff = it.seatbelt == false,
+            )
+        }
+        if (saved.phase == Phase.DEPARTING) flowJob = scope.launch { enterDeparting() }
+        else voice.say("앱이 다시 켜져서 쉼표를 이어 갈게요.")
+    }
+
+    private fun persist() {
+        val s = _state.value
+        if (s.phase != Phase.RESTING && s.phase != Phase.WAKING && s.phase != Phase.DEPARTING) return
+        sessions.save(
+            RestSession(
+                phase = s.phase, startedAt = restStartedAt, endAt = restEndAt, pausedRemainingMs = pausedRemaining,
+                minutes = s.restMinutes, seatReclined = seatReclined, passengers = s.passengers,
+                placeName = s.target?.displayName, applied = s.applied, savedAt = clock(), snapshot = snapshot,
+            )
+        )
     }
 
     private var warnedBattery = false
@@ -434,8 +699,13 @@ class ShimpyoController(
     }
 
     companion object {
+        private const val TAG = "Shimpyo/Flow"
         private const val KEY_DEMO = "demo"
         private const val TICK_MS = 500L
+        const val DEFAULT_REST_MIN = 20
+        const val READY_WAIT_MS = 40_000L
+        private const val AWAKE_TRIES = 3
+        private const val AWAKE_LISTEN_MS = 6_000L
         /** 시연 모드: 3초를 1분으로. */
         const val DEMO_MINUTE_MS = 3_000L
         private const val SUGGEST_WAIT_MS = 15_000L

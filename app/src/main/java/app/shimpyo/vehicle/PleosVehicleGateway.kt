@@ -14,6 +14,7 @@ import ai.pleos.playground.vehicle.constant.control.LightSwitch
 import ai.pleos.playground.vehicle.constant.control.MoveControl
 import ai.pleos.playground.vehicle.constant.control.VehicleGear
 import ai.pleos.playground.vehicle.constant.unit.TemperatureUnit
+import ai.pleos.playground.vehicle.listener.DoorPositionListener
 import ai.pleos.playground.vehicle.listener.DrivingTimeListener
 import ai.pleos.playground.vehicle.listener.EvBatteryStateOfChargeListener
 import ai.pleos.playground.vehicle.listener.GearSelectionListener
@@ -31,6 +32,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.resume
 import kotlin.math.max
 import kotlin.math.sign
@@ -46,14 +48,18 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
     private var probeJob: Job? = null
 
     private val _connected = MutableStateFlow(false)
+    private val _ready = MutableStateFlow(false)
     private val _gear = MutableStateFlow(Gear.UNKNOWN)
+    private val _doorOpen = MutableStateFlow<Boolean?>(null)
     private val _trip = MutableStateFlow<Int?>(null)
     private val _belt = MutableStateFlow<Boolean?>(null)
     private val _battery = MutableStateFlow<Int?>(null)
     private val _features = MutableStateFlow(CabinFeatures())
 
     override val connected: StateFlow<Boolean> = _connected
+    override val ready: StateFlow<Boolean> = _ready
     override val gear: StateFlow<Gear> = _gear
+    override val doorOpen: StateFlow<Boolean?> = _doorOpen
     override val tripDrivingMinutes: StateFlow<Int?> = _trip
     override val driverSeatbeltBuckled: StateFlow<Boolean?> = _belt
     override val batteryPercent: StateFlow<Int?> = _battery
@@ -70,6 +76,9 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
     private var ambientArea: SeatArea? = null
     private var windowArea: WindowArea? = null
     private var doorAreas: List<DoorArea> = emptyList()
+    // 문마다 열림 여부(리스너가 다른 스레드에서 올 수 있다)
+    private val doorsOpen = ConcurrentHashMap<DoorArea, Boolean>()
+    private val doorListeners = mutableMapOf<DoorArea, DoorPositionListener>()
     private var occupancyAreas: List<SeatArea> = emptyList()
     private var tempBounds: AreaBounds<Float>? = null
     private var fanBounds: AreaBounds<Int>? = null
@@ -115,6 +124,7 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
             vehicle.getOdometer().unregisterTripCurrentDrivingTime(tripListener)
             seatArea?.let { vehicle.getSeat().unregisterSeatBeltBuckledState(it, beltListener) }
             vehicle.getEvBattery().unregisterEvBatteryStateOfCharge(batteryListener)
+            doorListeners.forEach { (area, l) -> vehicle.getDoor().unregisterDoorPosition(area, l) }
         }
         scope.cancel()
         runCatching { vehicle.release() }
@@ -204,6 +214,24 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
                 onComplete = { c: CapabilityConfig, a: List<DoorArea> -> ok(c to a) }, onFailed = fail)
         }?.takeIf { it.first.writable }?.second.orEmpty()
 
+        // 쉼표 중 문이 열리면(화장실 등) 잠시 멈춘다
+        val doorPos = call<Pair<CapabilityConfig, Map<DoorArea, AreaBounds<Int>>>> { ok, fail ->
+            door.checkDoorPositionCapabilities(
+                onComplete = { c: CapabilityConfig, m: Map<DoorArea, AreaBounds<Int>> -> ok(c to m) }, onFailed = fail)
+        }?.takeIf { it.first.readable }?.second.orEmpty()
+        doorPos.forEach { (area, bounds) ->
+            fun update(pos: Int?) {
+                if (pos == null) doorsOpen.remove(area) else doorsOpen[area] = pos > bounds.minValue
+                _doorOpen.value = if (doorsOpen.isEmpty()) null else doorsOpen.values.any { it }
+            }
+            update(call<Int?> { ok, fail -> door.getCurrentDoorPosition(area, ok, fail) })
+            val l = object : DoorPositionListener {
+                override fun onPositionUpdated(pos: Int?) = update(pos)
+                override fun onFailed(e: Exception) = warn("door listener", e)
+            }
+            if (runCatching { door.registerDoorPosition(area, l) }.isSuccess) doorListeners[area] = l
+        }
+
         val ev = call<CapabilityConfig> { ok, fail ->
             vehicle.getEvBattery().checkEvBatteryStateOfChargeCapabilities(ok, fail)
         }?.readable == true
@@ -221,6 +249,7 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
             cabinLight = cabin != null,
             ambientLight = ambientArea != null && ambientBounds != null,
             doorLock = doorAreas.isNotEmpty(),
+            doorPosition = doorListeners.isNotEmpty(),
             evBattery = ev,
             tripTime = trip,
         )
@@ -238,16 +267,19 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
             _battery.value = call<Int?> { ok, fail -> vehicle.getEvBattery().getEvBatteryStateOfCharge(ok, fail) }
             runCatching { vehicle.getEvBattery().registerEvBatteryStateOfCharge(batteryListener) }
         }
+        _ready.value = true
         return true
     }
 
     override suspend fun passengersPresent(): Boolean? {
-        val others = occupancyAreas.filter { SeatValue.ROW_1_LEFT !in it.values }
+        val driver = occupancyAreas.firstOrNull { SeatValue.ROW_1_LEFT in it.values } ?: return null
+        val others = occupancyAreas.filter { it != driver }
         if (others.isEmpty()) return null
         val seat = vehicle.getSeat()
+        val driverValue = call<Boolean?> { ok, fail -> seat.getCurrentSeatOccupancy(driver, ok, fail) }
         val states = others.map { area -> call<Boolean?> { ok, fail -> seat.getCurrentSeatOccupancy(area, ok, fail) } }
-        if (states.all { it == null }) return null
-        return states.any { it == true }
+        Log.i(TAG, "occupancy driver=$driverValue ${others.map { it.ids() }} = $states")
+        return passengersFrom(driverValue, states)
     }
 
     override suspend fun snapshot(): CabinSnapshot {
@@ -304,7 +336,11 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
         val seat = vehicle.getSeat()
         val target = before.backrest
         val reclined = reclinedPosition
-        setCall { done, fail -> seat.moveSeatBackrestAngle(area, MoveControl.FORWARD, { _, _ -> done() }, fail) }
+        // 주행 기어에서는 차량이 시트 이동을 거부한다(에뮬레이터 오류 50001)
+        if (!setCall { done, fail -> seat.moveSeatBackrestAngle(area, MoveControl.FORWARD, { _, _ -> done() }, fail) }) {
+            Log.w(TAG, "seat restore refused")
+            return false
+        }
         if (target == null || reclined == null || reclined == target) {
             delay(RECLINE_MS) // 위치 값을 못 읽으면 젖힌 시간만큼 되돌린다
         } else {
