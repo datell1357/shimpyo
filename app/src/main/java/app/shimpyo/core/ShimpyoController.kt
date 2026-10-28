@@ -60,6 +60,14 @@ data class UiState(
     val askingAwake: Boolean = false,
     /** 동승자가 있어 운전석만 맞춘 쉼표. */
     val passengers: Boolean = false,
+    /** 핸들 보정 패턴이 운전 초반과 달라져 제안 기준을 앞당겼는지. */
+    val patternChanged: Boolean = false,
+    val batteryPercent: Int? = null,
+    val charging: Boolean = false,
+    /** 충전하며 쉬는 중이면 깨울 충전량(%). */
+    val chargeTarget: Int? = null,
+    /** 목표 충전량까지 남은 분(어림). 모르면 null. */
+    val chargeEtaMin: Int? = null,
 )
 
 /** 음성 비서(Gleo) 명령을 처리한 결과. */
@@ -113,6 +121,12 @@ class ShimpyoController(
     private var awakeTapped = false
     /** 주행 기어라 등받이를 못 세웠다 — P단이 되면 세운다. */
     private var seatRestorePending = false
+    private val steering = SteeringPattern(resetAfterParkedMin = policy.stopResetsAfterMin)
+    private var patternLogged = false
+    private val chargeEta = ChargeEstimator()
+    /** 이번 충전에서 쉬어 가자고 이미 물었는지. */
+    private var chargeOffered = false
+    private var chargeReached = false
 
     private val minuteMillis: Long get() = if (_state.value.demo) DEMO_MINUTE_MS else 60_000L
 
@@ -122,6 +136,8 @@ class ShimpyoController(
         scope.launch { location.arrivals.collect { onArrived("proximity") } }
         scope.launch { vehicle.gear.collect { onGear(it) } }
         scope.launch { vehicle.doorOpen.collect { onDoor(it == true) } }
+        scope.launch { vehicle.steeringDeg.collect { it?.let(steering::onAngle) } }
+        scope.launch { vehicle.charging.collect { onCharging(it == true) } }
         scope.launch {
             // 앱이 쉼표 도중에 꺼졌다면, 차량 기능 확인이 끝난 뒤 이어 가거나 되돌린다
             awaitReady()
@@ -281,6 +297,7 @@ class ShimpyoController(
     fun setDemo(on: Boolean) {
         prefs.edit().putBoolean(KEY_DEMO, on).apply()
         tracker.reset()
+        steering.reset()
         _state.update { it.copy(demo = on) }
     }
 
@@ -301,8 +318,18 @@ class ShimpyoController(
         val mm = minuteMillis
         val resting = s.phase == Phase.RESTING || s.phase == Phase.WAKING || s.phase == Phase.DEPARTING
 
-        if (!resting) tracker.tick(now, gear.isDriving, mm)
+        if (!resting) {
+            tracker.tick(now, gear.isDriving, mm)
+            steering.tick(now, gear.isDriving, mm)
+        }
         if (!s.demo) vehicle.tripDrivingMinutes.value?.let { tracker.seedMinutes(it - tripBaseline, mm) }
+        if (steering.changed && !patternLogged) {
+            Log.i(TAG, "steering pattern changed: ${"%.1f".format(steering.baselinePerMin)}/min -> ${"%.1f".format(steering.recentPerMin)}/min")
+        }
+        patternLogged = steering.changed
+        val soc = vehicle.batteryPercent.value
+        val charging = vehicle.charging.value == true
+        chargeEta.update(now, soc, charging)
 
         val fix = location.fix.value ?: if (s.demo) DEMO_FIX else null
         val next = fix?.let { areas.nextAhead(it.lat, it.lon, it.headingDeg) }
@@ -317,7 +344,11 @@ class ShimpyoController(
         val ns = s.copy(
             gear = gear,
             continuousMin = tracker.continuousMinutes(mm),
-            thresholdMin = policy.thresholdFor(hour),
+            thresholdMin = policy.thresholdFor(hour, steering.changed),
+            patternChanged = steering.changed,
+            batteryPercent = soc,
+            charging = charging,
+            chargeEtaMin = if (charging) chargeEta.minutesTo(s.chargeTarget ?: ChargeRest.TARGET_PCT, mm) else null,
             nextArea = next,
             targetDistanceKm = targetKm,
             arrived = s.arrived || arrivedByDistance,
@@ -337,14 +368,15 @@ class ShimpyoController(
             Phase.DRIVING -> {
                 val sinceDecline = lastDeclineAt?.let { ((now - it) / mm).toInt() }
                 if (gear.isDriving && flowJob?.isActive != true &&
-                    policy.shouldSuggest(ns.continuousMin, hour, suggestionsThisTrip, sinceDecline)
+                    policy.shouldSuggest(ns.continuousMin, hour, suggestionsThisTrip, sinceDecline, steering.changed)
                 ) {
                     lastDeclineAt = null
                     suggest(next, ns.continuousMin)
                 }
             }
             Phase.RESTING, Phase.WAKING -> if (pausedRemaining == null && !ns.busy) {
-                lowBatteryCheck(remaining)
+                if (!charging) lowBatteryCheck(remaining)
+                chargeTargetCheck(soc, remaining)
                 val due = WakePlan.dueSteps(remaining, ns.wakeDone, mm)
                 if (due.isNotEmpty()) runWake(due)
             }
@@ -357,9 +389,11 @@ class ShimpyoController(
 
     private fun suggest(hit: RestAreaHit?, continuousMin: Int) {
         suggestionsThisTrip++
+        // 졸리다고 단정하지 않고, 본 것(핸들 움직임)만 말한다
+        val why = if (steering.changed) "핸들 움직임이 출발 때와 달라졌어요. " else ""
         if (hit == null) {
             flowJob = scope.launch {
-                voice.say("${durationText(continuousMin)}째 운전 중이에요. 다음 휴게소나 졸음쉼터에서 쉬어 가세요.")
+                voice.say("$why${durationText(continuousMin)}째 운전 중이에요. 다음 휴게소나 졸음쉼터에서 쉬어 가세요.")
             }
             lastDeclineAt = clock()
             return
@@ -367,7 +401,7 @@ class ShimpyoController(
         _state.update { it.copy(phase = Phase.SUGGESTING, target = hit.area) }
         flowJob = scope.launch {
             val km = hit.distanceKm.roundToInt().coerceAtLeast(1)
-            voice.say("${durationText(continuousMin)}째 운전 중이에요. ${km}킬로미터 앞 ${hit.area.displayName}에서 쉬어 갈까요?")
+            voice.say("$why${durationText(continuousMin)}째 운전 중이에요. ${km}킬로미터 앞 ${hit.area.displayName}에서 쉬어 갈까요?")
             if (_state.value.phase != Phase.SUGGESTING) return@launch
             when (voice.askYesNo()) {
                 true -> acceptSuggestion()
@@ -428,6 +462,43 @@ class ShimpyoController(
         }
     }
 
+    /** 정차 중 충전을 시작하면, 충전하는 동안 쉬어 가자고 한 번 묻는다. */
+    private fun onCharging(on: Boolean) {
+        if (!on) { chargeOffered = false; return }
+        val soc = vehicle.batteryPercent.value
+        if (chargeOffered || _state.value.phase != Phase.PARKED || (soc != null && soc >= ChargeRest.TARGET_PCT)) return
+        chargeOffered = true
+        Log.i(TAG, "charging started at $soc%")
+        voice.cancelListening()
+        flowJob?.cancel()
+        flowJob = scope.launch {
+            // 1%가 오를 때까지 잠깐 기다리면 목표까지 남은 시간을 어림할 수 있다
+            withTimeoutOrNull(CHARGE_RATE_WAIT_MIN * minuteMillis) {
+                while (chargeEta.minutesTo(ChargeRest.TARGET_PCT, minuteMillis) == null) delay(TICK_MS)
+            }
+            val eta = chargeEta.minutesTo(ChargeRest.TARGET_PCT, minuteMillis)
+            val minutes = ChargeRest.restMinutes(eta, DEFAULT_REST_MIN)
+            Log.i(TAG, "offer charge rest: eta=$eta min -> $minutes min")
+            voice.say(
+                (eta?.let { "${ChargeRest.TARGET_PCT}%까지 ${it}분쯤 걸려요. " } ?: "") +
+                    "충전하는 동안 ${minutes}분 쉬어 갈까요? 그 전에 ${ChargeRest.TARGET_PCT}%가 차면 그때 깨워 드릴게요."
+            )
+            if (_state.value.phase != Phase.PARKED) return@launch
+            if (voice.askYesNo() == true) beginRest(minutes)
+        }
+    }
+
+    /** 충전하며 쉬는 중 목표 충전량에 닿으면, 남은 시간과 관계없이 지금부터 천천히 깨운다. */
+    private fun chargeTargetCheck(soc: Int?, remaining: Long) {
+        val target = _state.value.chargeTarget ?: return
+        if (chargeReached || soc == null || soc < target) return
+        chargeReached = true
+        val lead = (WakePlan.leadMin * minuteMillis).toLong()
+        if (remaining > lead) restEndAt = clock() + lead
+        persist()
+        Log.i(TAG, "charge target $target% reached at $soc%: wake in ${minOf(remaining, lead)}ms")
+    }
+
     private fun onGear(gear: Gear) {
         val s = _state.value
         if (gear == Gear.PARK && seatRestorePending) scope.launch { finishPendingSeatRestore() }
@@ -471,6 +542,10 @@ class ShimpyoController(
         val snap = vehicle.snapshot()
         snapshot = snap
         val passengers = vehicle.passengersPresent() == true
+        // 충전 중에 시작한 쉼표는 목표 충전량에 닿으면 일찍 깨운다
+        val soc = vehicle.batteryPercent.value
+        val chargeTarget = ChargeRest.TARGET_PCT.takeIf { vehicle.charging.value == true && (soc == null || soc < it) }
+        chargeReached = false
         restStartedAt = clock()
         restEndAt = restStartedAt + minutes * minuteMillis
         // 시트를 움직이기 전에 먼저 저장 — 도중에 앱이 꺼져도 다시 켜질 때 되돌릴 수 있게
@@ -478,7 +553,7 @@ class ShimpyoController(
             // 화면이 쉼표로 바뀌는 순간부터 남은 시간을 보여 준다(다음 tick을 기다리면 0:00이 잠깐 보임)
             it.copy(phase = Phase.RESTING, passengers = passengers, restTotalMs = restEndAt - restStartedAt,
                 restRemainingMs = restEndAt - restStartedAt, applied = emptyList(), manualHints = emptyList(),
-                wakeDone = emptySet())
+                wakeDone = emptySet(), chargeTarget = chargeTarget)
         }
         seatReclined = true
         persist()
@@ -494,7 +569,7 @@ class ShimpyoController(
 
         restStartedAt = clock()
         restEndAt = restStartedAt + minutes * minuteMillis
-        Log.i(TAG, "rest started after ${restStartedAt - t0}ms, passengers=$passengers applied=$applied hints=$hints")
+        Log.i(TAG, "rest started after ${restStartedAt - t0}ms, passengers=$passengers chargeTarget=$chargeTarget applied=$applied hints=$hints")
         _state.update {
             it.copy(
                 phase = Phase.RESTING, restTotalMs = restEndAt - restStartedAt, restRemainingMs = restEndAt - restStartedAt,
@@ -505,7 +580,10 @@ class ShimpyoController(
         persist()
         if (passengers) voice.say("동승자가 있어서 창문은 그대로 두고 운전석만 맞췄어요.")
         if (hints.isNotEmpty()) voice.say(hints.joinToString(". ") + ".")
-        voice.say("푹 쉬세요. ${minutes}분 뒤에 천천히 깨워 드릴게요.")
+        voice.say(
+            if (chargeTarget != null) "푹 쉬세요. ${minutes}분 뒤에, 그 전에 ${chargeTarget}%가 차면 그때 천천히 깨워 드릴게요."
+            else "푹 쉬세요. ${minutes}분 뒤에 천천히 깨워 드릴게요."
+        )
     }
 
     /** 단계마다 따로 실행해 서로 막지 않게 한다. 알람만 시트가 다 돌아온 뒤에 울린다. */
@@ -578,6 +656,14 @@ class ShimpyoController(
         persist()
         restoreSeatIfReclined()
         vehicle.restoreCabin(snapshot)
+        if (_state.value.chargeTarget != null) {
+            val soc = vehicle.batteryPercent.value
+            val line = listOfNotNull(
+                soc?.let { "배터리 ${it}%예요." },
+                "충전기를 뽑아 주세요.".takeIf { vehicle.charging.value == true },
+            ).joinToString(" ")
+            if (line.isNotEmpty()) voice.say(line)
+        }
         val belt = vehicle.driverSeatbeltBuckled.value
         voice.say(
             when {
@@ -597,12 +683,14 @@ class ShimpyoController(
             sessions.clear()
             log.add(RestRecord(restStartedAt, s.restMinutes, s.target?.displayName))
             tracker.reset()
+            // 쉬고 난 뒤의 운전을 새 기준으로 다시 배운다
+            steering.reset()
             tripBaseline = vehicle.tripDrivingMinutes.value ?: 0
             suggestionsThisTrip = 0
             lastDeclineAt = null
             _state.update {
                 it.copy(phase = Phase.DRIVING, target = null, arrived = false, applied = emptyList(),
-                    manualHints = emptyList(), wakeDone = emptySet(), beltWasOff = false, passengers = false)
+                    manualHints = emptyList(), wakeDone = emptySet(), beltWasOff = false, passengers = false, chargeTarget = null)
             }
             refreshToday()
             voice.say("출발해도 좋아요. 원래 길로 안내를 이어 갈게요.")
@@ -616,7 +704,7 @@ class ShimpyoController(
         pausedRemaining = null
         _state.update {
             it.copy(phase = Phase.DRIVING, applied = emptyList(), wakeDone = emptySet(), target = null,
-                paused = false, askingAwake = false, passengers = false)
+                paused = false, askingAwake = false, passengers = false, chargeTarget = null)
         }
         navi.clearRestStop()
         location.clearArrival()
@@ -668,8 +756,10 @@ class ShimpyoController(
                 restTotalMs = saved.endAt - saved.startedAt, restRemainingMs = pausedRemaining ?: max(0L, saved.endAt - now),
                 applied = saved.applied, manualHints = emptyList(), wakeDone = emptySet(),
                 paused = pausedRemaining != null, passengers = saved.passengers, beltWasOff = it.seatbelt == false,
+                chargeTarget = saved.chargeTarget,
             )
         }
+        chargeReached = false
         if (saved.phase == Phase.DEPARTING) flowJob = scope.launch { enterDeparting() }
         else voice.say("앱이 다시 켜져서 쉼표를 이어 갈게요.")
     }
@@ -682,6 +772,7 @@ class ShimpyoController(
                 phase = s.phase, startedAt = restStartedAt, endAt = restEndAt, pausedRemainingMs = pausedRemaining,
                 minutes = s.restMinutes, seatReclined = seatReclined, passengers = s.passengers,
                 placeName = s.target?.displayName, applied = s.applied, savedAt = clock(), snapshot = snapshot,
+                chargeTarget = s.chargeTarget,
             )
         )
     }
@@ -716,6 +807,8 @@ class ShimpyoController(
         /** 시연 모드: 3초를 1분으로. */
         const val DEMO_MINUTE_MS = 3_000L
         private const val SUGGEST_WAIT_MS = 15_000L
+        /** 충전을 시작한 뒤 충전 속도를 보려고 기다리는 시간(분). */
+        private const val CHARGE_RATE_WAIT_MIN = 1
         private const val ARRIVE_KM = 0.35
         private const val LOW_BATTERY = 15
         /** 위치를 못 받을 때 시연 모드가 쓰는 위치: 경부고속도로 옥산 졸음쉼터 남쪽 약 8km. */

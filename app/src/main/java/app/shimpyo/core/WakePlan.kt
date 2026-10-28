@@ -17,6 +17,9 @@ object WakePlan {
         WakeStep.ALARM to 0.0,
     )
 
+    /** 끝나기 몇 분 전부터 깨우기 시작하는지(첫 단계). */
+    val leadMin: Double get() = offsetsMin.values.max()
+
     /** 아직 실행하지 않은 단계 중 지금 실행할 단계들(순서대로). */
     fun dueSteps(remainingMillis: Long, done: Set<WakeStep>, minuteMillis: Long): List<WakeStep> =
         offsetsMin.filter { (step, before) ->

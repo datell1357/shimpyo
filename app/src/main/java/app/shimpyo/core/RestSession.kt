@@ -24,6 +24,8 @@ data class RestSession(
     val applied: List<String>,
     val savedAt: Long,
     val snapshot: CabinSnapshot,
+    /** 충전하며 쉬는 중이면 깨울 충전량(%). */
+    val chargeTarget: Int? = null,
 ) {
     enum class Resume { CONTINUE, RESTORE }
 
@@ -40,6 +42,7 @@ data class RestSession(
         put("pausedRemainingMs", pausedRemainingMs); put("minutes", minutes)
         put("seatReclined", seatReclined); put("passengers", passengers)
         put("placeName", placeName); put("applied", applied.joinToString(SEP)); put("savedAt", savedAt)
+        put("chargeTarget", chargeTarget)
         with(snapshot) {
             put("s.backrest", backrest); put("s.climatePower", climatePower); put("s.temperature", temperature)
             put("s.fanSpeed", fanSpeed); put("s.recirculation", recirculation); put("s.window", window)
@@ -79,6 +82,7 @@ data class RestSession(
                     ambientBrightness = s("s.ambientBrightness")?.toInt(),
                     ventilation = s("s.ventilation")?.toInt(),
                 ),
+                chargeTarget = s("chargeTarget")?.toInt(),
             )
         }.getOrNull()
     }

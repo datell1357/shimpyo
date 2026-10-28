@@ -1,5 +1,7 @@
 package app.shimpyo
 
+import app.shimpyo.core.ChargeEstimator
+import app.shimpyo.core.ChargeRest
 import app.shimpyo.core.CommandResult
 import app.shimpyo.core.ContinuousDrivingTracker
 import app.shimpyo.core.Geo
@@ -9,6 +11,7 @@ import app.shimpyo.core.RestAreaRepository
 import app.shimpyo.core.RestPolicy
 import app.shimpyo.core.RestSession
 import app.shimpyo.core.ShimpyoController
+import app.shimpyo.core.SteeringPattern
 import app.shimpyo.core.VoiceIntent
 import app.shimpyo.core.WakeAnswer
 import app.shimpyo.core.WakePlan
@@ -63,6 +66,77 @@ class CoreLogicTest {
         assertFalse(p.shouldSuggest(100, 10, 0, null))
         assertTrue(p.shouldSuggest(120, 10, 0, null))
         assertTrue(p.shouldSuggest(80, 4, 0, null))
+    }
+
+    @Test fun `핸들 패턴이 달라지면 20분 앞당기되 1시간 아래로는 안 내린다`() {
+        val p = RestPolicy()
+        assertEquals(100, p.thresholdFor(10, patternChanged = true))
+        assertEquals(90, p.thresholdFor(14, patternChanged = true))
+        assertEquals(60, p.thresholdFor(4, patternChanged = true))   // 새벽 80 → 60
+        assertFalse(p.shouldSuggest(100, 10, 0, null))
+        assertTrue(p.shouldSuggest(100, 10, 0, null, patternChanged = true))
+        assertEquals(50, RestPolicy(dawnThresholdMin = 50).thresholdFor(4, patternChanged = true)) // 원래 1시간 아래면 그대로
+    }
+
+    /** 1분 = 1초로 줄여 [minutes]분 동안 [periodMs]마다 핸들을 [amp]도씩 좌우로 흔든다. */
+    private fun SteeringPattern.drive(startMs: Long, minutes: Int, periodMs: Long?, amp: Float = 0.5f): Long {
+        var now = startMs
+        var side = 1
+        var nextFlip = now
+        val end = now + minutes * 1_000L
+        while (now < end) {
+            now += 100
+            tick(now, true, 1_000L)
+            if (periodMs != null && now >= nextFlip) { onAngle(side * amp); side = -side; nextFlip = now + periodMs }
+            else onAngle(if (periodMs == null) 0f else -side * amp)
+        }
+        return now
+    }
+
+    @Test fun `핸들 보정이 초반의 절반 아래로 줄면 달라진 것으로 본다`() {
+        val sp = SteeringPattern()
+        sp.tick(0, true, 1_000L)
+        var now = sp.drive(0, 15, periodMs = 500)       // 초반 15분: 분당 반전 약 2번
+        assertEquals(2.0, sp.baselinePerMin!!, 0.3)
+        assertFalse(sp.changed)
+        now = sp.drive(now, 5, periodMs = 500)          // 같은 패턴이면 그대로
+        assertFalse(sp.changed)
+        now = sp.drive(now, 6, periodMs = null)         // 보정이 사라짐
+        assertTrue(sp.changed)
+        // P단으로 10분 서 있으면(쉼) 처음부터 다시 배운다
+        repeat(11) { now += 1_000; sp.tick(now, false, 1_000L) }
+        assertFalse(sp.changed)
+        assertNull(sp.baselinePerMin)
+    }
+
+    @Test fun `반전은 정한 각도 이상 되돌아올 때만 센다`() {
+        val sp = SteeringPattern(gapDeg = 1f)
+        sp.tick(0, true, 1_000L)
+        var now = 0L
+        // 0.4도로 흔들면 반전이 아니다 → 초반 기준이 0이라 비교하지 않는다
+        now = sp.drive(now, 15, periodMs = 500, amp = 0.2f)
+        assertEquals(0.0, sp.baselinePerMin!!, 1e-9)
+        sp.drive(now, 6, periodMs = null)
+        assertFalse(sp.changed)
+    }
+
+    @Test fun `충전 목표까지 남은 시간과 쉼표 길이`() {
+        val e = ChargeEstimator()
+        val m = 60_000L
+        e.update(0, 40, true)
+        assertNull(e.minutesTo(80, m))                 // 아직 오르는 걸 못 봄
+        e.update(2 * m, 42, true)                      // 분당 1%
+        assertEquals(38, e.minutesTo(80, m))
+        e.update(3 * m, 42, true)
+        assertEquals(38, e.minutesTo(80, m))           // 같은 값이면 마지막 변화 기준
+        e.update(4 * m, 81, true)
+        assertEquals(0, e.minutesTo(80, m))
+        e.update(5 * m, 81, false)                     // 충전이 끝나면 지운다
+        assertNull(e.minutesTo(80, m))
+        assertEquals(30, ChargeRest.restMinutes(38, 20))
+        assertEquals(10, ChargeRest.restMinutes(4, 20))
+        assertEquals(18, ChargeRest.restMinutes(18, 20))
+        assertEquals(20, ChargeRest.restMinutes(null, 20))
     }
 
     @Test fun `거절하면 20분 뒤에 한 번 더, 한 주행에 최대 3번`() {
@@ -132,6 +206,8 @@ class CoreLogicTest {
     @Test fun `쉼표 상태를 저장했다가 그대로 되살린다`() {
         val s = session(paused = 300_000L)
         assertEquals(s, RestSession.decode(s.encode()))
+        val charging = s.copy(chargeTarget = 80)
+        assertEquals(charging, RestSession.decode(charging.encode()))
         assertNull(RestSession.decode("phase=NOPE"))
     }
 

@@ -7,6 +7,8 @@
 3. **깨우기·출발 준비** — 빛 → 바람·시트 통풍 → 시트 원위치 → 알람 순서로 깨우고 "깨셨어요?"를 확인한 뒤, 시트·공조·창문·조명을 쉼표 전으로 되돌리고, 안전벨트를 확인하고 원래 목적지로 안내를 잇습니다.
 4. **Gleo AI 음성 명령** — `assets/schema.json`의 함수 3개(`START_REST_BREAK`, `FIND_REST_AREA`, `END_REST_BREAK`)로 Gleo가 쉼표를 직접 부릅니다.
 5. **쉼표 지킴이** — 포그라운드 서비스로 내비가 앞에 있어도 타이머·도착 판정이 멈추지 않고, 쉼표 상태를 저장해 앱이 꺼졌다 켜져도 이어 가거나 쉼표 전으로 되돌립니다.
+6. **핸들 신호로 제안 앞당기기** — 핸들 미세 보정(조향 반전) 횟수를 운전 초반 15분과 최근 5분으로 비교해, 2배 넘게 늘거나 절반 아래로 줄면 제안 기준을 20분 앞당깁니다(1시간 아래로는 안 내림). 졸음 판정이 아니라 보조 신호로만 쓰고, 각도는 메모리에서만 셉니다.
+7. **전기차 충전 쉼표** — P단에서 충전을 시작하면 배터리가 오르는 속도로 80%까지 남은 시간을 어림해 쉼표 길이를 권하고(10~30분), 쉬는 동안 80%가 차면 정한 시간보다 일찍 천천히 깨웁니다. 출발 준비에서 배터리와 충전기 분리를 알려 줍니다.
 
 차종마다 지원 기능을 먼저 확인(capability)해 있는 기능만 쓰고, 없는 기능은 음성 안내로 대신합니다.
 
@@ -31,7 +33,7 @@ Pleos Connect Emulator 설치는 [Pleos Connect Emulator 설치 및 실행](http
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-release APK: [`apk/Shimpyo_쉼표_release.apk`](apk/) (v0.3.0, R8 축소·서명). 직접 만들려면 `keystore.properties`(storeFile, storePassword, keyAlias, keyPassword — 저장소에 올리지 않음)를 두고 `./gradlew assembleRelease`를 실행합니다.
+release APK: [`apk/Shimpyo_쉼표_release.apk`](apk/) (v0.4.0, R8 축소·서명). 직접 만들려면 `keystore.properties`(storeFile, storePassword, keyAlias, keyPassword — 저장소에 올리지 않음)를 두고 `./gradlew assembleRelease`를 실행합니다.
 
 ### 테스트
 
@@ -39,7 +41,7 @@ release APK: [`apk/Shimpyo_쉼표_release.apk`](apk/) (v0.3.0, R8 축소·서명
 ./gradlew testDebugUnitTest
 ```
 
-쉼터 찾기(진행 방향), 제안 기준(시간대·거절 뒤 재제안·최대 횟수), 연속 운전 계산(10분 정차 시 초기화), 깨우기 순서, 음성 대답 판별(제안·깨운 뒤), 쉼표 상태 저장·복원과 이어 가기 판단, 동승자 판단, Gleo 응답 문장을 검사합니다(15개).
+쉼터 찾기(진행 방향), 제안 기준(시간대·거절 뒤 재제안·최대 횟수·핸들 패턴으로 앞당김), 연속 운전 계산(10분 정차 시 초기화), 핸들 반전 패턴 비교, 충전 목표까지 남은 시간 어림·쉼표 길이, 깨우기 순서, 음성 대답 판별(제안·깨운 뒤), 쉼표 상태 저장·복원과 이어 가기 판단, 동승자 판단, Gleo 응답 문장을 검사합니다(19개).
 
 ## 테스트 환경과 시연 방법
 
@@ -66,7 +68,17 @@ curl -X PUT 'http://127.0.0.1:8088/vehicle/seat?kind=occupied&area=passenger&val
 
 # 쉼표 중 앱 강제 종료 → 쉼표 지킴이가 다시 떠서 남은 시간으로 이어 감
 adb shell am crash app.shimpyo
+
+# 핸들 신호: 기어 D에서 처음 15분(시연 모드 45초)은 1.5초마다 좌우로 흔들고, 그 뒤 0에 두면 제안 기준이 20분 앞당겨짐
+curl -X PUT 'http://127.0.0.1:8088/vehicle/controls?steering=20'   # 다음엔 -20, 20, ... 마지막에 0
+
+# 충전 쉼표: P단에서 배터리를 낮추고 충전을 켠 뒤, 배터리를 올려 80%가 되면 일찍 깨움
+curl -X PUT 'http://127.0.0.1:8088/vehicle/ev-battery?field=soc&value=40'
+curl -X PUT 'http://127.0.0.1:8088/vehicle/ev-battery?field=charge_switch&value=true'
+curl -X PUT 'http://127.0.0.1:8088/vehicle/ev-battery?field=soc&value=80'
 ```
+
+Virtual Console은 충전을 켜도 배터리 %를 스스로 올리지 않아, 충전 속도는 콘솔에서 값을 올려 흉내 냅니다.
 
 차량이 아닌 기기(폰 에뮬레이터)에서는 가상 차량으로 실행되며, 설정 화면에서 기어·안전벨트를 바꿀 수 있습니다.
 
@@ -90,6 +102,8 @@ adb shell am crash app.shimpyo
 | 쉼표 중 기어 D | ◯ 공조·창문·조명 즉시 복원. 등받이는 주행 기어에서 차량이 거부(오류 50001) → 안내 후 P단에서 0 → 100 |
 | 앱 종료·백그라운드 | ◯ 설정 앱을 앞에 띄워도 FGS 상태로 동결 안 됨, `am crash` 뒤 서비스가 다시 떠 남은 시간으로 이어 감 → 깨우기·복원 |
 | 깨운 뒤 확인 | ◯ "깼어요" 버튼·대답 없음 3회 → 출발 준비 |
+| 핸들 각도(앞바퀴 조향각) | ◯ 콘솔에서 흔들다 멈추면 반전 분당 1.8 → 0.6 → 제안 기준 2시간 → 1시간 40분, 1시간 40분에 "핸들 움직임이 출발 때와 달라졌어요" 제안 |
+| EV 충전 스위치·배터리 | ◯ 충전 시작 → "충전하는 동안 쉬어 갈까요?" → 20분 쉼표 중 80% 도달 → 약 20초(시연 시간) 일찍 깨움 → 출발 준비에 배터리·충전기 표시. 충전 한도 값은 Vehicle SDK에 읽는 함수가 없어 목표를 80%로 둠 |
 
 시연할 때 알아 둘 점:
 - Virtual Console 페이지가 열려 **활성 상태일 때만** 차량 값이 시뮬레이션됩니다(닫혀 있으면 `emulator_inactive`).
@@ -104,13 +118,13 @@ adb shell am crash app.shimpyo
 
 | 권한 | 용도 |
 |---|---|
-| `pleos.car.permission.CAR_DRIVE` | 기어, 트립 운전 시간 |
+| `pleos.car.permission.CAR_DRIVE` | 기어, 트립 운전 시간, 핸들 각도 |
 | `CAR_SEATS` / `CONTROL_CAR_SEATS` | 등받이 위치·이동, 시트 통풍, 안전벨트, 착석 |
 | `CAR_CLIMATE` / `CONTROL_CAR_CLIMATE` | 공조 전원·온도·풍량·외기 |
 | `CAR_WINDOWS` / `CONTROL_CAR_WINDOWS` | 운전석 창문 |
 | `CAR_LIGHTS` / `CONTROL_CAR_LIGHTS` | 실내등, 앰비언트 조명 |
 | `CAR_DOORS` / `CONTROL_CAR_DOORS` | 문 잠김 확인·잠금, 쉼표 중 문 열림 감지 |
-| `CAR_ENERGY` | EV 배터리 잔량(낮으면 일찍 깨움) |
+| `CAR_ENERGY` | EV 배터리 잔량(낮으면 일찍 깨움), 충전 중인지(충전 쉼표) |
 | `FUSED_LOCATION` | 차량 위치(다음 졸음쉼터 계산) |
 | `NAVI_ROUTE` / `NAVI_ROUTE_SEARCH` | 경유지 추가·제거, 남은 거리·시간 |
 | `TTS_SERVICE` / `STT_SERVICE` | 음성 안내, 짧은 대답 인식(ON_DEVICE 모드) |
@@ -125,7 +139,7 @@ app/src/main/
 ├── assets/schema.json   Gleo AI App Schema(함수 3개)
 └── java/app/shimpyo/
     ├── TripService.kt  쉼표 지킴이(포그라운드 서비스)
-    ├── core/      흐름(ShimpyoController), 쉼표 상태 저장(RestSession), 제안 기준, 연속 운전, 깨우기 순서, 졸음쉼터 검색, 기록, 주행 규제
+    ├── core/      흐름(ShimpyoController), 쉼표 상태 저장(RestSession), 제안 기준, 연속 운전, 핸들 패턴(SteeringPattern), 충전 쉼표(ChargeRest), 깨우기 순서, 졸음쉼터 검색, 기록, 주행 규제
     ├── vehicle/   Vehicle SDK 연동(PleosVehicleGateway), 가상 차량(SimVehicleGateway)
     ├── navi/      NaviHelper 경유지·도착
     ├── location/  FusedLocation 위치·근접 알림
@@ -138,3 +152,4 @@ app/src/main/
 
 - 졸음쉼터 위치: 공공데이터포털 「전국졸음쉼터표준데이터」(한국도로공사, 데이터기준일자 2026-02-25, 253곳)를 `app/src/main/assets/rest_areas.psv`에 내장 — 통신 없이 동작
 - 휴식 기록은 차 안에만 저장하고 외부로 보내지 않습니다. 운전 행동 데이터를 마케팅에 쓰지 않습니다.
+- 핸들 각도는 반전 횟수만 메모리에서 세고 저장하지 않으며, 쉬고 나면 처음부터 다시 셉니다.

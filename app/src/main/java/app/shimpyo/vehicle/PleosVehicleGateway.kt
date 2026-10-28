@@ -19,6 +19,7 @@ import ai.pleos.playground.vehicle.listener.DrivingTimeListener
 import ai.pleos.playground.vehicle.listener.EvBatteryStateOfChargeListener
 import ai.pleos.playground.vehicle.listener.GearSelectionListener
 import ai.pleos.playground.vehicle.listener.SeatBeltBuckledStateListener
+import ai.pleos.playground.vehicle.listener.SteeringWheelAngleListener
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
@@ -54,6 +55,8 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
     private val _trip = MutableStateFlow<Int?>(null)
     private val _belt = MutableStateFlow<Boolean?>(null)
     private val _battery = MutableStateFlow<Int?>(null)
+    private val _charging = MutableStateFlow<Boolean?>(null)
+    private val _steering = MutableStateFlow<Float?>(null)
     private val _features = MutableStateFlow(CabinFeatures())
 
     override val connected: StateFlow<Boolean> = _connected
@@ -63,6 +66,8 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
     override val tripDrivingMinutes: StateFlow<Int?> = _trip
     override val driverSeatbeltBuckled: StateFlow<Boolean?> = _belt
     override val batteryPercent: StateFlow<Int?> = _battery
+    override val charging: StateFlow<Boolean?> = _charging
+    override val steeringDeg: StateFlow<Float?> = _steering
     override val features: StateFlow<CabinFeatures> = _features
 
     // capability 확인으로 고른 영역과 값 범위
@@ -106,6 +111,10 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
         override fun onEvBatteryStateOfChargeUpdated(value: Int?) { _battery.value = value }
         override fun onFailed(e: Exception) = warn("battery listener", e)
     }
+    private val steeringListener = object : SteeringWheelAngleListener {
+        override fun onSteeringWheelAngleUpdated(angle: Float?) { _steering.value = angle }
+        override fun onFailed(e: Exception) = warn("steering listener", e)
+    }
 
     override fun start() {
         runCatching { vehicle.initialize() }.onFailure { warn("initialize", it) }
@@ -124,6 +133,7 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
             vehicle.getOdometer().unregisterTripCurrentDrivingTime(tripListener)
             seatArea?.let { vehicle.getSeat().unregisterSeatBeltBuckledState(it, beltListener) }
             vehicle.getEvBattery().unregisterEvBatteryStateOfCharge(batteryListener)
+            vehicle.getSteeringWheel().unregisterSteeringWheelAngle(steeringListener)
             doorListeners.forEach { (area, l) -> vehicle.getDoor().unregisterDoorPosition(area, l) }
         }
         scope.cancel()
@@ -238,6 +248,13 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
         val trip = call<CapabilityConfig> { ok, fail ->
             odometer.checkTripCurrentDrivingTimeCapabilities(ok, fail)
         }?.readable == true
+        val charge = call<CapabilityConfig> { ok, fail ->
+            vehicle.getEvBattery().checkEvChargeSwitchCapabilities(ok, fail)
+        }?.readable == true
+        val steering = call<Pair<CapabilityConfig, AreaBounds<Float>>> { ok, fail ->
+            vehicle.getSteeringWheel().checkSteeringWheelAngleCapabilities(
+                onComplete = { c: CapabilityConfig, b: AreaBounds<Float> -> ok(c to b) }, onFailed = fail)
+        }?.first?.readable == true
 
         _features.value = CabinFeatures(
             seatRecline = seatArea != null,
@@ -251,6 +268,8 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
             doorLock = doorAreas.isNotEmpty(),
             doorPosition = doorListeners.isNotEmpty(),
             evBattery = ev,
+            evCharge = charge,
+            steering = steering,
             tripTime = trip,
         )
         Log.i(TAG, "features ${_features.value}")
@@ -266,6 +285,19 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
         if (ev) {
             _battery.value = call<Int?> { ok, fail -> vehicle.getEvBattery().getEvBatteryStateOfCharge(ok, fail) }
             runCatching { vehicle.getEvBattery().registerEvBatteryStateOfCharge(batteryListener) }
+        }
+        if (steering) {
+            _steering.value = call<Float?> { ok, fail -> vehicle.getSteeringWheel().getCurrentSteeringWheelAngle(ok, fail) }
+            runCatching { vehicle.getSteeringWheel().registerSteeringWheelAngle(steeringListener) }
+        }
+        // 충전 스위치는 변경 알림이 없어 P단인 동안만 몇 초마다 읽는다
+        if (charge) scope.launch {
+            while (true) {
+                _charging.value = if (_gear.value == Gear.PARK) {
+                    call<Boolean?> { ok, fail -> vehicle.getEvBattery().getEvChargeSwitchState(ok, fail) }
+                } else false
+                delay(CHARGE_POLL_MS)
+            }
         }
         _ready.value = true
         return true
@@ -531,6 +563,7 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
         const val CALL_TIMEOUT_MS = 3_000L
         const val SET_WAIT_MS = 600L
         const val RECLINE_MS = 3_000L
+        const val CHARGE_POLL_MS = 2_000L
         const val DEFAULT_TEMP = 22f
     }
 }

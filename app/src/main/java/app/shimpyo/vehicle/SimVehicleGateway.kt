@@ -21,6 +21,8 @@ class SimVehicleGateway : VehicleGateway {
     override val tripDrivingMinutes: StateFlow<Int?> = MutableStateFlow(null)
     override val driverSeatbeltBuckled: StateFlow<Boolean?> = _belt
     override val batteryPercent: StateFlow<Int?> = _battery
+    override val charging: StateFlow<Boolean?> = MutableStateFlow(false)
+    override val steeringDeg: StateFlow<Float?> = MutableStateFlow(null)
     override val features: StateFlow<CabinFeatures> = MutableStateFlow(
         CabinFeatures(
             seatRecline = true, seatVentilation = true, seatbelt = true, seatOccupancy = false,

@@ -3,6 +3,7 @@ package app.shimpyo.core
 /**
  * 언제 쉬어 가자고 제안할지.
  * 기본 2시간(화물차 휴게 기준과 같음), 졸음이 잦은 이른 오후는 1시간 50분, 새벽은 1시간 20분.
+ * 핸들 보정 패턴이 운전 초반과 달라지면 20분 앞당긴다(1시간 아래로는 안 내림).
  */
 data class RestPolicy(
     val baseThresholdMin: Int = 120,
@@ -10,13 +11,18 @@ data class RestPolicy(
     val dawnThresholdMin: Int = 80,
     val retryAfterDeclineMin: Int = 20,
     val maxSuggestionsPerTrip: Int = 3,
+    val patternAdvanceMin: Int = 20,
+    val minThresholdMin: Int = 60,
     /** P단으로 이만큼 서 있으면 이미 쉰 것으로 보고 연속 운전 시간을 0으로. */
     val stopResetsAfterMin: Int = 10,
 ) {
-    fun thresholdFor(hour: Int): Int = when (hour) {
-        in 2..5 -> dawnThresholdMin
-        in 13..15 -> afternoonThresholdMin
-        else -> baseThresholdMin
+    fun thresholdFor(hour: Int, patternChanged: Boolean = false): Int {
+        val base = when (hour) {
+            in 2..5 -> dawnThresholdMin
+            in 13..15 -> afternoonThresholdMin
+            else -> baseThresholdMin
+        }
+        return if (patternChanged) (base - patternAdvanceMin).coerceAtLeast(minOf(base, minThresholdMin)) else base
     }
 
     fun shouldSuggest(
@@ -24,9 +30,10 @@ data class RestPolicy(
         hour: Int,
         suggestionsThisTrip: Int,
         minutesSinceLastDecline: Int?,
+        patternChanged: Boolean = false,
     ): Boolean {
         if (suggestionsThisTrip >= maxSuggestionsPerTrip) return false
-        if (continuousMin < thresholdFor(hour)) return false
+        if (continuousMin < thresholdFor(hour, patternChanged)) return false
         return minutesSinceLastDecline == null || minutesSinceLastDecline >= retryAfterDeclineMin
     }
 }

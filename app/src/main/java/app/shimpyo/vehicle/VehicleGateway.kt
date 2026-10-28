@@ -19,6 +19,8 @@ data class CabinFeatures(
     val doorLock: Boolean = false,
     val doorPosition: Boolean = false,
     val evBattery: Boolean = false,
+    val evCharge: Boolean = false,
+    val steering: Boolean = false,
     val tripTime: Boolean = false,
 ) {
     val any: Boolean get() = seatRecline || climate || window || cabinLight || ambientLight
@@ -61,6 +63,10 @@ interface VehicleGateway {
     val tripDrivingMinutes: StateFlow<Int?>
     val driverSeatbeltBuckled: StateFlow<Boolean?>
     val batteryPercent: StateFlow<Int?>
+    /** EV 충전 중인지(충전 스위치). 충전은 P단에서만 되므로 P단에서만 확인한다. 알 수 없으면 null. */
+    val charging: StateFlow<Boolean?>
+    /** 앞바퀴 조향각(도, 왼쪽이 음수). 알 수 없으면 null. */
+    val steeringDeg: StateFlow<Float?>
     val features: StateFlow<CabinFeatures>
 
     /** 탑승객이 있는 좌석(운전석 제외). 알 수 없으면 null. */

@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
+import app.shimpyo.core.ChargeRest
 import app.shimpyo.core.Phase
 import app.shimpyo.core.RestAreaHit
 import app.shimpyo.core.ShimpyoController
@@ -71,6 +72,7 @@ import app.shimpyo.core.WakeStep
 import app.shimpyo.vehicle.CabinFeatures
 import app.shimpyo.vehicle.Gear
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class Actions(
@@ -352,6 +354,10 @@ private fun Driving(s: UiState, wide: Boolean, a: Actions) {
                 )
                 Text("기준 ${dur(s.thresholdMin)}", style = MaterialTheme.typography.bodyLarge, color = Palette.Faint)
             }
+            if (s.patternChanged) {
+                Spacer(Modifier.height(10.dp))
+                Text("핸들 움직임이 출발 때와 달라 기준을 앞당겼어요", style = MaterialTheme.typography.bodyLarge, color = Palette.Accent)
+            }
         },
         right = {
             RestAreaCard(s.nextArea, "다음 졸음쉼터")
@@ -400,6 +406,10 @@ private fun Suggest(s: UiState, wide: Boolean, a: Actions) {
     Split(
         wide,
         left = {
+            if (s.patternChanged) {
+                Label("핸들 움직임이 출발 때와 달라요", Palette.Accent)
+                Spacer(Modifier.height(14.dp))
+            }
             TwoTone(
                 "${dur(s.continuousMin)}째 운전 중이에요.",
                 "${area?.displayName ?: "다음 졸음쉼터"}에서\n쉬어 갈까요?",
@@ -458,23 +468,54 @@ private fun Heading(s: UiState, wide: Boolean) {
 
 @Composable
 private fun Parked(s: UiState, a: Actions) {
+    val charge = s.charging && (s.batteryPercent ?: 0) < ChargeRest.TARGET_PCT
+    // 충전 중이면 목표 충전량까지 남은 시간에 가까운 길이를 추천
+    val suggested = if (charge) ChargeRest.restMinutes(s.chargeEtaMin, ShimpyoController.DEFAULT_REST_MIN) else ShimpyoController.DEFAULT_REST_MIN
+    val options = listOf(15, 20, 25)
+    val recommended = options.minBy { abs(it - suggested) }
     Column(Modifier.fillMaxWidth()) {
         TwoTone(
-            if (s.arrived && s.target != null) "${s.target.displayName}에 도착했어요." else "잠깐 쉬어 갈까요?",
+            when {
+                charge -> "충전하는 동안 쉬어 갈까요?"
+                s.arrived && s.target != null -> "${s.target.displayName}에 도착했어요."
+                else -> "잠깐 쉬어 갈까요?"
+            },
             "얼마나 쉴까요?",
         )
+        if (charge) {
+            Spacer(Modifier.height(24.dp))
+            ChargeLine(s)
+        }
         Spacer(Modifier.height(40.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            listOf(15, 20, 25).forEach { m ->
-                DurationTile(m, recommended = m == ShimpyoController.DEFAULT_REST_MIN, modifier = Modifier.weight(1f), busy = s.busy) {
+            options.forEach { m ->
+                DurationTile(m, recommended = m == recommended, modifier = Modifier.weight(1f), busy = s.busy) {
                     a.startRest(m)
                 }
             }
         }
         Spacer(Modifier.height(32.dp))
-        Text("고르면 시트 · 공기 · 조명을 맞추고 정한 시간에 깨워 드려요.", style = MaterialTheme.typography.bodyLarge, color = Palette.Muted)
+        Text(
+            if (charge) "그 전에 ${ChargeRest.TARGET_PCT}%가 차면 그때 깨워 드려요. 시트 · 공기 · 조명도 맞춰요."
+            else "고르면 시트 · 공기 · 조명을 맞추고 정한 시간에 깨워 드려요.",
+            style = MaterialTheme.typography.bodyLarge, color = Palette.Muted,
+        )
         Spacer(Modifier.height(14.dp))
         FeatureLine(s.features)
+    }
+}
+
+/** 충전 중 배터리 → 목표, 남은 시간. */
+@Composable
+private fun ChargeLine(s: UiState) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        PulseDot()
+        Spacer(Modifier.width(14.dp))
+        Text("충전 중", style = MaterialTheme.typography.titleLarge, color = Palette.Accent)
+        Spacer(Modifier.width(24.dp))
+        Text("${s.batteryPercent?.let { "$it%" } ?: "–"}  →  ${ChargeRest.TARGET_PCT}%", style = Numeral.copy(fontSize = 34.sp), color = Palette.Text)
+        Spacer(Modifier.width(24.dp))
+        Text(s.chargeEtaMin?.let { "약 ${dur(it)} 남음" } ?: "남은 시간 계산 중", style = MaterialTheme.typography.bodyLarge, color = Palette.Muted)
     }
 }
 
@@ -540,6 +581,9 @@ private fun Resting(s: UiState, wide: Boolean, a: Actions) {
                 Spacer(Modifier.height(6.dp))
                 s.applied.forEach { DataRow(it, "✓", valueColor = Palette.Muted) }
                 s.manualHints.forEach { DataRow(it, "직접", valueColor = Palette.Accent, labelColor = Palette.Text) }
+                s.chargeTarget?.let { target ->
+                    DataRow("충전 · ${target}%가 차면 깨움", s.batteryPercent?.let { "$it%" } ?: "–", valueColor = Palette.Accent, labelColor = Palette.Text)
+                }
                 Spacer(Modifier.height(28.dp))
                 Pill("지금 일어날게요", primary = false, height = 76.dp, onClick = a.wakeNow)
             },
@@ -632,6 +676,13 @@ private fun Departing(s: UiState, wide: Boolean, a: Actions) {
                 when (s.seatbelt) { true -> "확인됨"; false -> "매 주세요"; null -> "확인해 주세요" },
                 valueColor = if (s.seatbelt == false) Palette.Accent else Palette.Text, labelColor = Palette.Text,
             )
+            if (s.chargeTarget != null) {
+                DataRow("배터리", s.batteryPercent?.let { "$it%" } ?: "–", labelColor = Palette.Text)
+                DataRow(
+                    "충전기", if (s.charging) "뽑아 주세요" else "분리됨",
+                    valueColor = if (s.charging) Palette.Accent else Palette.Text, labelColor = Palette.Text,
+                )
+            }
         },
         right = {
             Pill("출발할게요", Modifier.fillMaxWidth(), onClick = a.depart)
@@ -711,6 +762,7 @@ private fun Settings(s: UiState, a: Actions, onClose: () -> Unit) {
                     "창문" to f.window, "실내등" to f.cabinLight, "앰비언트 조명" to f.ambientLight,
                     "문 잠금" to f.doorLock, "문 열림 감지" to f.doorPosition, "동승자 감지" to f.seatOccupancy,
                     "안전벨트" to f.seatbelt, "트립 운전 시간" to f.tripTime, "EV 배터리" to f.evBattery,
+                    "EV 충전 상태" to f.evCharge, "핸들 각도" to f.steering,
                 ).forEach { (k, on) ->
                     DataRow(k, if (on) "자동" else "안내만", valueColor = if (on) Palette.Text else Palette.Faint)
                 }
