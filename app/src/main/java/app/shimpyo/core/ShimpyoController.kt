@@ -541,7 +541,9 @@ class ShimpyoController(
         voice.say("${minutes}분 쉼표 시작할게요. 시트와 공기를 맞출게요.")
         val snap = vehicle.snapshot()
         snapshot = snap
-        val passengers = vehicle.passengersPresent() == true
+        // 동승자를 확인하지 못하면(좌석 센서 없음) 자고 있는 사람이 있을 수 있어 창문은 열지 않는다
+        val occupancy = vehicle.passengersPresent()
+        val passengers = occupancy == true
         // 충전 중에 시작한 쉼표는 목표 충전량에 닿으면 일찍 깨운다
         val soc = vehicle.batteryPercent.value
         val chargeTarget = ChargeRest.TARGET_PCT.takeIf { vehicle.charging.value == true && (soc == null || soc < it) }
@@ -564,6 +566,7 @@ class ShimpyoController(
         if (vehicle.reclineDriverSeat()) applied += "운전석 등받이 젖힘" else { seatReclined = false; hints += "등받이를 편하게 젖혀 주세요" }
         if (vehicle.setRestClimate(snap)) applied += "외기 유입 · 1℃ 낮춤" else hints += "공조를 외기 모드로 바꿔 주세요"
         if (passengers) applied += "동승자가 있어 창문은 그대로"
+        else if (occupancy == null) applied += "동승자를 확인하지 못해 창문은 그대로"
         else if (vehicle.openWindowSlightly()) applied += "운전석 창문 살짝"
         if (vehicle.dimCabin()) applied += "실내 조명 낮춤"
 
@@ -800,7 +803,8 @@ class ShimpyoController(
         private const val TAG = "Shimpyo/Flow"
         private const val KEY_DEMO = "demo"
         private const val TICK_MS = 500L
-        const val DEFAULT_REST_MIN = 20
+        /** 기본 쉼표 길이. 앱 소개의 "15분 꿀잠"과 같게(15·20·25분 중 고름). */
+        const val DEFAULT_REST_MIN = 15
         const val READY_WAIT_MS = 40_000L
         private const val AWAKE_TRIES = 3
         private const val AWAKE_LISTEN_MS = 6_000L

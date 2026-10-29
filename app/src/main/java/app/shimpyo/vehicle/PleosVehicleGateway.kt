@@ -343,11 +343,13 @@ class PleosVehicleGateway(context: Context) : VehicleGateway {
         val door = vehicle.getDoor()
         val front = doorAreas.filter { a -> a.values.any { it == DoorValue.ROW_1_LEFT || it == DoorValue.ROW_1_RIGHT } }
             .ifEmpty { doorAreas }
+        // 차가 잠금을 거부하면 "문 잠김 확인"을 띄우지 않는다
+        var allLocked = true
         front.forEach { area ->
             val locked = call<Boolean?> { ok, fail -> door.getDoorLockState(area, ok, fail) }
-            if (locked != true) setCall { ok, fail -> door.setDoorLock(area, true, { _, _ -> ok() }, fail) }
+            if (locked != true && !setCall { ok, fail -> door.setDoorLock(area, true, { _, _ -> ok() }, fail) }) allLocked = false
         }
-        return true
+        return allLocked
     }
 
     override suspend fun reclineDriverSeat(): Boolean {

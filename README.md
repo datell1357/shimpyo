@@ -1,4 +1,4 @@
-# 쉼표, — 졸음쉼터 15분 휴식 앱 (Pleos Connect)
+# 쉼표 — 졸음쉼터 15분 휴식 앱 (Pleos Connect)
 
 졸음이 오면 쉼터로, 쉼터에선 15분 꿀잠 — 차가 졸음쉼터 휴식의 처음부터 끝까지를 대신 챙겨 주는 차량용 앱입니다.
 
@@ -33,7 +33,7 @@ Pleos Connect Emulator 설치는 [Pleos Connect Emulator 설치 및 실행](http
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-release APK: [`apk/Shimpyo_쉼표_release.apk`](apk/) (v0.4.0, R8 축소·서명). 직접 만들려면 `keystore.properties`(storeFile, storePassword, keyAlias, keyPassword — 저장소에 올리지 않음)를 두고 `./gradlew assembleRelease`를 실행합니다.
+release APK: [`apk/Shimpyo_쉼표_release.apk`](apk/) (v0.4.1, R8 축소·서명). 직접 만들려면 `keystore.properties`(storeFile, storePassword, keyAlias, keyPassword — 저장소에 올리지 않음)를 두고 `./gradlew assembleRelease`를 실행합니다.
 
 ### 테스트
 
@@ -71,6 +71,7 @@ adb shell am crash app.shimpyo
 
 # 핸들 신호: 기어 D에서 처음 15분(시연 모드 45초)은 1.5초마다 좌우로 흔들고, 그 뒤 0에 두면 제안 기준이 20분 앞당겨짐
 curl -X PUT 'http://127.0.0.1:8088/vehicle/controls?steering=20'   # 다음엔 -20, 20, ... 마지막에 0
+# (콘솔 값은 핸들 각도라 앱이 받는 앞바퀴 각도는 훨씬 작음 — ±4° 이상으로 흔들어야 앱의 0.1° 문턱을 넘음)
 
 # 충전 쉼표: P단에서 배터리를 낮추고 충전을 켠 뒤, 배터리를 올려 80%가 되면 일찍 깨움
 curl -X PUT 'http://127.0.0.1:8088/vehicle/ev-battery?field=soc&value=40'
